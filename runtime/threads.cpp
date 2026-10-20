@@ -36,9 +36,9 @@ struct Binding {
     // What the save wrote into the context's SRR0 and r1. A context that no longer holds
     // them was re-initialised since (see binding_stale).
     uint32_t srr0 = 0, sp = 0;
-    // BIND_JMP: the guest's buffer as the save wrote it, and the value the resumed setjmp
-    // returns.
-    std::vector<uint8_t> image;
+    // BIND_JMP: the buffer's identifying words as the save wrote them, as (offset, value)
+    // pairs, and the value the resumed setjmp returns.
+    std::vector<uint32_t> image;
     uint32_t status = 1;
 };
 
@@ -295,18 +295,31 @@ extern "C" void hle_OSLoadContext(CPU* c) {
 // buffer the game filled in with an entry point and a stack pointer. Recompiled, a longjmp
 // that loads r1 and LR and returns is just a return, so each task runs on a host thread of
 // its own, as each guest thread does, and the baton passes the same way. jmp.txt names the
-// pair and the buffer's size (recomp.py wraps both: coro_saved and coro_longjmp).
+// pair and the offsets of the buffer's words that say where it resumes -- its stack
+// pointer and return address (recomp.py wraps both: coro_saved and coro_longjmp).
 //
-// A save is resumed as long as the guest's buffer still holds what the save wrote, and
-// may be resumed again (the scheduler's is, once per task). A buffer the game rewrote since
-// -- a new task, or one sent to its exit function -- starts a fresh host thread that runs
-// the game's longjmp on it. A host thread no save refers to can never run again, so it
-// ends (its own, after its last jump; another's, once its saves are all gone).
+// A save is resumed as long as those words still hold what the save wrote, and may be
+// resumed again (the scheduler's is, once per task). A buffer the game rewrote since -- a
+// new task, or one sent to its exit function -- starts a fresh host thread that runs the
+// game's longjmp on it. Only those words are compared: a stray store into the rest of a
+// buffer (a saved callee-saved register) changes nothing about where it resumes. A host
+// thread no save refers to can never run again, so it ends (its own, after its last jump;
+// another's, once its saves are all gone).
 
 static bool image_matches(const Binding& b, uint32_t jb) {
-    for (size_t i = 0; i < b.image.size(); i++)
-        if (mem_r8(jb + (uint32_t)i) != b.image[i]) return false;
+    for (size_t i = 0; i < b.image.size(); i += 2)
+        if (mem_r32(jb + b.image[i]) != b.image[i + 1]) return false;
     return true;
+}
+
+static void log_changed(const Binding& b, uint32_t jb) {
+    if (!g_log_enabled[LOG_THREAD]) return;
+    for (size_t i = 0; i < b.image.size(); i += 2)
+        if (mem_r32(jb + b.image[i]) != b.image[i + 1]) {
+            LOG(LOG_THREAD, "jmp save %08X (host %d) changed at +%X: %08X -> %08X", jb, b.h->id, b.image[i],
+                b.image[i + 1], mem_r32(jb + b.image[i]));
+            return;
+        }
 }
 
 static bool host_reachable(HostThread* h) {
@@ -331,18 +344,23 @@ static void sweep_jmp(HostThread* self) {
     static uint32_t n;
     if (++n % 64) return;
     for (auto& kv : g_bindings)
-        if (kv.second.kind == BIND_JMP && kv.second.h != self && !image_matches(kv.second, kv.first))
+        if (kv.second.kind == BIND_JMP && kv.second.h != self && !image_matches(kv.second, kv.first)) {
+            log_changed(kv.second, kv.first);
             drop_jmp(kv.second, self);
+        }
 }
 
-extern "C" void coro_saved(CPU* c, uint32_t jb, uint32_t size) {
+extern "C" void coro_saved(CPU* c, uint32_t jb, const uint32_t* keys, uint32_t nkeys) {
     Binding& b = g_bindings[jb];  // its jb was filled at the call site (hle_context_jmpbuf)
     HostThread* old = b.kind != BIND_NONE ? b.h : nullptr;
     b.h = t_self;
     b.kind = BIND_JMP;
     b.snapshot = *c;
-    b.image.resize(size);
-    for (uint32_t i = 0; i < size; i++) b.image[i] = mem_r8(jb + i);
+    b.image.clear();
+    for (uint32_t i = 0; i < nkeys; i++) {
+        b.image.push_back(keys[i]);
+        b.image.push_back(mem_r32(jb + keys[i]));
+    }
     if (old && old != t_self && !host_reachable(old)) {
         LOG(LOG_THREAD, "coroutine host %d unreachable: retired", old->id);
         retire(old);
@@ -363,7 +381,10 @@ extern "C" void coro_longjmp(CPU* c, void (*orig)(CPU*)) {
         if (b->h == self) resume_binding(self, b);
         target = b->h;
     } else {
-        if (b) drop_jmp(*b, self);
+        if (b) {
+            log_changed(*b, jb);
+            drop_jmp(*b, self);
+        }
         target = new_host_thread();
         target->cpu = *c;
         target->cpu.host = target;

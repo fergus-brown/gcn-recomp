@@ -59,7 +59,8 @@ The game project provides:
 - `recomp/names.txt`, `recomp/patches.txt` — hand-named functions and instruction patches,
   usually empty.
 - `recomp/jmp.txt` — a game's own setjmp/longjmp pair that switches stacks, as
-  `<setjmp> <longjmp> <buffer size>`, for a game that runs cooperative tasks of its own
+  `<setjmp> <longjmp> <offset>...` (the offsets, in hex, of the buffer's stack pointer and
+  return address), for a game that runs cooperative tasks of its own
   (each then runs on a host thread, as guest threads do: `runtime/threads.cpp`,
   "Coroutines"); absent for most games.
 - `recomp/steps.txt` — the game's per-frame steps, for running it at another frame rate

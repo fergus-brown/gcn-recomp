@@ -347,7 +347,7 @@ void rels_unlinked(uint32_t module_info);
    "Coroutines"): the setjmp's wrapper records the save after the original body ran, and
    the longjmp's hands over to whoever saved the buffer, or starts it afresh with the
    original body when the game wrote the buffer itself. */
-void coro_saved(CPU* c, uint32_t jmpbuf, uint32_t size);
+void coro_saved(CPU* c, uint32_t jmpbuf, const uint32_t* keys, uint32_t nkeys);
 void coro_longjmp(CPU* c, void (*orig)(CPU*));
 
 void call_indirect(CPU* c, uint32_t addr);

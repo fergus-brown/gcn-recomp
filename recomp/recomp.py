@@ -299,17 +299,21 @@ def main():
                     g.labels.add(t)
                     stats['mid_entries'] += 1
 
-    # jmp.txt: "<setjmp> <longjmp> <buffer size>", a game's own setjmp/longjmp pair that
-    # switches stacks (runtime/threads.cpp, "Coroutines"). A call to the setjmp is a resume
-    # point, as one to OSSaveContext is; both are wrapped to tell the runtime.
+    # jmp.txt: "<setjmp> <longjmp> <offset>...", a game's own setjmp/longjmp pair that
+    # switches stacks, and the offsets of the buffer's words that say where it resumes (its
+    # stack pointer and return address; runtime/threads.cpp, "Coroutines"). A call to the
+    # setjmp is a resume point, as one to OSSaveContext is; both are wrapped to tell the
+    # runtime.
     coro = {}
     cp = os.path.join(tables, 'jmp.txt')
     if os.path.exists(cp):
         for line in open(cp):
             line = line.split('#', 1)[0].split()
             if line:
-                coro[line[0]] = ('set', int(line[2], 16))
-                coro[line[1]] = ('long', 0)
+                if len(line) < 3:
+                    sys.exit(f'error: jmp.txt: {" ".join(line)}: no offsets')
+                coro[line[0]] = ('set', [int(k, 16) for k in line[2:]])
+                coro[line[1]] = ('long', None)
     coro_set = {f.addr: f.name for f in funcs if f.name in coro and coro[f.name][0] == 'set'}
     for name in coro:
         if not any(f.name == name for f in funcs):
@@ -327,9 +331,11 @@ def main():
             elif f.name == 'OSUnlink':
                 f.rel_hook = f'rels_unlinked(c->r[3]); orig_{f.name}(c);'
         if f.name in coro and not f.hle and len(f.entries) == 1:
-            kind, size = coro[f.name]
+            kind, keys = coro[f.name]
             if kind == 'set':
-                f.rel_hook = f'uint32_t jb = c->r[3]; orig_{f.name}(c); coro_saved(c, jb, 0x{size:X}u);'
+                k = ', '.join(f'0x{o:X}u' for o in keys)
+                f.rel_hook = (f'static const uint32_t keys[] = {{{k}}}; uint32_t jb = c->r[3]; '
+                              f'orig_{f.name}(c); coro_saved(c, jb, keys, {len(keys)}u);')
             else:
                 f.rel_hook = f'coro_longjmp(c, orig_{f.name});'
 
