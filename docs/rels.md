@@ -65,3 +65,17 @@ the game linked it. `--log=os` prints each link and unlink.
 
 Nothing checks that a module's code is only entered while it is linked; the game cannot
 do otherwise on the console either.
+
+## Modules that share an id
+
+The SDK only needs a module's id to be unique among the modules linked at once, so a game
+that links one module at a time may give them all the same id. `rel.py` accepts that: an
+import naming the module's own id resolves to the module itself, and only an import from a
+*different* module needs that module's id to be unique. Each module in `.rels` carries a
+fingerprint, FNV-1a of its sections as the file holds them, before any link.
+
+At run time `rels_linking` identifies the module before `OSLink` patches it: by its id when
+that is unique, otherwise by computing the same fingerprint from guest memory. It
+remembers the module by its header's address, which is what `rels_linked` and
+`rels_unlinked` then look it up by. A module the game changed before linking matches no
+fingerprint and runs as one that was not recompiled (`--log=os` says so).

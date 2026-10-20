@@ -24,7 +24,9 @@
 #include <vector>
 
 
-enum BindKind { BIND_NONE, BIND_SAVED, BIND_EXC };
+// BIND_JMP: a save by a game's own setjmp (jmp.txt; "Coroutines" below), which, unlike a
+// context, may be resumed any number of times.
+enum BindKind { BIND_NONE, BIND_SAVED, BIND_EXC, BIND_JMP };
 
 struct Binding {
     HostThread* h = nullptr;
@@ -34,6 +36,10 @@ struct Binding {
     // What the save wrote into the context's SRR0 and r1. A context that no longer holds
     // them was re-initialised since (see binding_stale).
     uint32_t srr0 = 0, sp = 0;
+    // BIND_JMP: the guest's buffer as the save wrote it, and the value the resumed setjmp
+    // returns.
+    std::vector<uint8_t> image;
+    uint32_t status = 1;
 };
 
 struct HostThread {
@@ -44,6 +50,9 @@ struct HostThread {
     bool run = false;
     Binding* resume = nullptr;   // set by whoever wakes us
     uint32_t start_ctx = 0;      // for fresh threads
+    // A fresh coroutine: the game's longjmp, run first to load the registers from start_jmp.
+    void (*start_longjmp)(CPU*) = nullptr;
+    uint32_t start_jmp = 0, start_status = 1;
     bool retired = false;        // its guest thread is gone: exit when woken
 };
 
@@ -152,7 +161,8 @@ static Binding* wait_for_baton(HostThread* self) {
     self->cpu = b->snapshot;
     self->cpu.host = self;
     if (b->kind == BIND_SAVED) self->cpu.r[3] = 1;
-    b->kind = BIND_NONE;
+    if (b->kind == BIND_JMP) self->cpu.r[3] = b->status;
+    else b->kind = BIND_NONE;
     irq_request();  // re-evaluate pending interrupts after a switch
     GCN_LONGJMP(b->jb, 1);  // the mask-free variant off Windows; see compat.h
 }
@@ -209,6 +219,16 @@ static void* host_thread_main(void* arg) {
     Binding* b = wait_for_baton(self);
     if (b) fatal("fresh host thread %d asked to resume a binding", self->id);
     CPU* c = &self->cpu;
+    if (self->start_longjmp) {
+        // The game's longjmp loads every register from the buffer and returns to its LR,
+        // which, as a C function, is a return here with c->lr the place to start.
+        c->r[3] = self->start_jmp;
+        c->r[4] = self->start_status;
+        self->start_longjmp(c);
+        LOG(LOG_THREAD, "host thread %d starting coroutine %08X at %08X", self->id, self->start_jmp, c->lr);
+        call_indirect(c, c->lr);
+        for (;;) call_indirect(c, c->lr);
+    }
     uint32_t pc = mem_r32(self->start_ctx + CTX_SRR0);
     context_to_cpu(c, self->start_ctx);
     mem_w16(self->start_ctx + CTX_STATE, mem_r16(self->start_ctx + CTX_STATE) & ~OS_CONTEXT_STATE_EXC);
@@ -264,6 +284,108 @@ extern "C" void hle_OSLoadContext(CPU* c) {
     LOG(LOG_THREAD, "load fresh ctx %08X -> new host thread %d", ctx, h->id);
     spawn(h);
     switch_to(self, h, nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Coroutines: a game's own setjmp/longjmp pair that switches stacks
+// ---------------------------------------------------------------------------
+// Some games run cooperative tasks on stacks of their own, switched with a setjmp/longjmp
+// pair of the game's (not the SDK's): a scheduler saves itself once and jumps into each
+// task; a task saves itself and jumps back to the scheduler's buffer; a new task is a
+// buffer the game filled in with an entry point and a stack pointer. Recompiled, a longjmp
+// that loads r1 and LR and returns is just a return, so each task runs on a host thread of
+// its own, as each guest thread does, and the baton passes the same way. jmp.txt names the
+// pair and the buffer's size (recomp.py wraps both: coro_saved and coro_longjmp).
+//
+// A save is resumed as long as the guest's buffer still holds what the save wrote, and
+// may be resumed again (the scheduler's is, once per task). A buffer the game rewrote since
+// -- a new task, or one sent to its exit function -- starts a fresh host thread that runs
+// the game's longjmp on it. A host thread no save refers to can never run again, so it
+// ends (its own, after its last jump; another's, once its saves are all gone).
+
+static bool image_matches(const Binding& b, uint32_t jb) {
+    for (size_t i = 0; i < b.image.size(); i++)
+        if (mem_r8(jb + (uint32_t)i) != b.image[i]) return false;
+    return true;
+}
+
+static bool host_reachable(HostThread* h) {
+    for (auto& kv : g_bindings)
+        if (kv.second.h == h && kv.second.kind != BIND_NONE) return true;
+    return false;
+}
+
+static void drop_jmp(Binding& b, HostThread* self) {
+    HostThread* old = b.h;
+    b.kind = BIND_NONE;
+    b.image.clear();
+    if (old && old != self && !host_reachable(old)) {
+        LOG(LOG_THREAD, "coroutine host %d unreachable: retired", old->id);
+        retire(old);
+    }
+}
+
+// Saves whose buffer the game has since reused, found every so often rather than on every
+// jump: their host threads end, rather than wait for ever.
+static void sweep_jmp(HostThread* self) {
+    static uint32_t n;
+    if (++n % 64) return;
+    for (auto& kv : g_bindings)
+        if (kv.second.kind == BIND_JMP && kv.second.h != self && !image_matches(kv.second, kv.first))
+            drop_jmp(kv.second, self);
+}
+
+extern "C" void coro_saved(CPU* c, uint32_t jb, uint32_t size) {
+    Binding& b = g_bindings[jb];  // its jb was filled at the call site (hle_context_jmpbuf)
+    HostThread* old = b.kind != BIND_NONE ? b.h : nullptr;
+    b.h = t_self;
+    b.kind = BIND_JMP;
+    b.snapshot = *c;
+    b.image.resize(size);
+    for (uint32_t i = 0; i < size; i++) b.image[i] = mem_r8(jb + i);
+    if (old && old != t_self && !host_reachable(old)) {
+        LOG(LOG_THREAD, "coroutine host %d unreachable: retired", old->id);
+        retire(old);
+    }
+    LOG(LOG_THREAD, "jmp save %08X on host %d", jb, t_self->id);
+}
+
+extern "C" void coro_longjmp(CPU* c, void (*orig)(CPU*)) {
+    HostThread* self = t_self;
+    const uint32_t jb = c->r[3], status = c->r[4] ? c->r[4] : 1;
+    sweep_jmp(self);
+    auto it = g_bindings.find(jb);
+    Binding* b = it != g_bindings.end() && it->second.kind == BIND_JMP ? &it->second : nullptr;
+    HostThread* target = nullptr;
+    if (b && image_matches(*b, jb)) {
+        b->status = status;
+        LOG(LOG_THREAD, "jmp %08X (host %d -> %d)", jb, self->id, b->h->id);
+        if (b->h == self) resume_binding(self, b);
+        target = b->h;
+    } else {
+        if (b) drop_jmp(*b, self);
+        target = new_host_thread();
+        target->cpu = *c;
+        target->cpu.host = target;
+        target->start_longjmp = orig;
+        target->start_jmp = jb;
+        target->start_status = status;
+        LOG(LOG_THREAD, "jmp %08X fresh -> new host thread %d", jb, target->id);
+        spawn(target);
+        b = nullptr;
+    }
+    if (!host_reachable(self)) {
+        // Nothing can resume this host thread (a task jumping out for the last time): hand
+        // over and end it.
+        {
+            std::lock_guard<std::mutex> lk(self->m);
+            self->run = false;
+        }
+        LOG(LOG_THREAD, "host %d ends after its last jump", self->id);
+        wake(target, b);
+        plat_thread_exit();
+    }
+    switch_to(self, target, b);
 }
 
 // ---------------------------------------------------------------------------

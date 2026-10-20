@@ -4,7 +4,7 @@
 Usage: recomp.py <main.dol> <dtk symbols.txt> <outdir> <tables dir>
 
 The tables directory holds the per-game steering files: names.txt, hle.txt,
-patches.txt, special_calls.txt, idle.txt and steps.txt (any may be absent).
+patches.txt, special_calls.txt, idle.txt, steps.txt and jmp.txt (any may be absent).
 """
 import collections
 import os
@@ -142,13 +142,14 @@ def load_modules(path):
 def load_rels(dol_path):
     """<dol>.rels and <dol>.relocs, from recomp/rel.py: the relocatable modules linked at
     canonical addresses, and the instructions whose immediate holds a relocated address.
-    Returns ([(id, name, [(section, canon, size, exec)])], {addr: (kind, module, section, addend)})."""
+    Returns ([(id, name, [(section, canon, size, exec)], fingerprint)],
+    {addr: (kind, module, section, addend)})."""
     rels, relocs = [], {}
     if os.path.exists(dol_path + '.rels'):
         for line in open(dol_path + '.rels'):
             parts = line.split()
             if parts and parts[0] == 'module':
-                rels.append((int(parts[2]), parts[3], []))
+                rels.append((int(parts[2]), parts[3], [], int(parts[7], 16)))
             elif parts and parts[0] == 'section':
                 rels[-1][2].append((int(parts[1]), int(parts[2], 16), int(parts[3], 16), parts[4] == '1'))
         for line in open(dol_path + '.relocs'):
@@ -194,7 +195,7 @@ def main():
     dol = Dol(dol_path)
     modules = load_modules(dol_path + '.modules')
     rels, relocs = load_rels(dol_path)
-    rel_text = [(c, sz) for _, _, secs in rels for _, c, sz, exe in secs if exe]
+    rel_text = [(c, sz) for _, _, secs, _ in rels for _, c, sz, exe in secs if exe]
 
     def in_module(addr):
         return any(c <= addr < c + sz for c, sz, _, _ in modules)
@@ -298,6 +299,22 @@ def main():
                     g.labels.add(t)
                     stats['mid_entries'] += 1
 
+    # jmp.txt: "<setjmp> <longjmp> <buffer size>", a game's own setjmp/longjmp pair that
+    # switches stacks (runtime/threads.cpp, "Coroutines"). A call to the setjmp is a resume
+    # point, as one to OSSaveContext is; both are wrapped to tell the runtime.
+    coro = {}
+    cp = os.path.join(tables, 'jmp.txt')
+    if os.path.exists(cp):
+        for line in open(cp):
+            line = line.split('#', 1)[0].split()
+            if line:
+                coro[line[0]] = ('set', int(line[2], 16))
+                coro[line[1]] = ('long', 0)
+    coro_set = {f.addr: f.name for f in funcs if f.name in coro and coro[f.name][0] == 'set'}
+    for name in coro:
+        if not any(f.name == name for f in funcs):
+            sys.exit(f'error: jmp.txt names {name}, which the symbols do not')
+
     for f in funcs:
         if f.name in hle:
             f.hle = True
@@ -309,6 +326,12 @@ def main():
                 f.rel_hook = f'uint32_t m = c->r[3]; rels_linking(m); orig_{f.name}(c); if (c->r[3]) rels_linked(m);'
             elif f.name == 'OSUnlink':
                 f.rel_hook = f'rels_unlinked(c->r[3]); orig_{f.name}(c);'
+        if f.name in coro and not f.hle and len(f.entries) == 1:
+            kind, size = coro[f.name]
+            if kind == 'set':
+                f.rel_hook = f'uint32_t jb = c->r[3]; orig_{f.name}(c); coro_saved(c, jb, 0x{size:X}u);'
+            else:
+                f.rel_hook = f'coro_longjmp(c, orig_{f.name});'
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -338,6 +361,7 @@ def main():
         return s
 
     special_calls = load_kv(os.path.join(tables, 'special_calls.txt'))
+    special_calls.update(coro_set)
     # idle.txt: addresses of backward branches that are the OS's "nothing to run" spin
     # (the SDK scheduler's wait for RunQueueBitmap). They poll through IDLE_CHECK, which
     # lets the runtime skip guest time forward to the next event instead of spinning.
@@ -547,10 +571,10 @@ def main():
     if len(rels) > 256:
         sys.exit(f'error: {len(rels)} modules, more than REL_MAX_MODULES (runtime/recomp.h)')
     table.append('const RecompRel g_recomp_rels[] = {')
-    for mid, name, secs in rels:
-        table.append(f'\t{{{mid}u, "{name}", {len(secs)}u, {{' +
+    for mid, name, secs, fp in rels:
+        table.append(f'\t{{{mid}u, 0x{fp:016X}ull, "{name}", {len(secs)}u, {{' +
                      ', '.join(f'{{{s}u, 0x{c:08X}u, 0x{sz:X}u, {int(e)}u}}' for s, c, sz, e in secs) + '}},')
-    table.append('\t{0, 0, 0, {{0, 0, 0, 0}}}};')
+    table.append('\t{0, 0, 0, 0, {{0, 0, 0, 0}}}};')
     table.append(f'const uint32_t g_recomp_rel_count = {len(rels)};')
     write('recomp_funcs.h', '\n'.join(header) + '\n')
     write('recomp_table.c', '\n'.join(table) + '\n')

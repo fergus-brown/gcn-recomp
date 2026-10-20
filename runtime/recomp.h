@@ -323,7 +323,9 @@ uint32_t modules_canon(uint32_t a);
 #define REL_MAX_SECTIONS 32
 #define REL_MAX_MODULES 256
 typedef struct { uint32_t index, canon, size, exec; } RecompRelSection;
-typedef struct { uint32_t id; const char* name; uint32_t count; RecompRelSection sections[REL_MAX_SECTIONS]; } RecompRel;
+/* fingerprint: FNV-1a of the module's file sections before a link (recomp/rel.py), which
+   tells apart modules that share an id. */
+typedef struct { uint32_t id; uint64_t fingerprint; const char* name; uint32_t count; RecompRelSection sections[REL_MAX_SECTIONS]; } RecompRel;
 extern const RecompRel g_recomp_rels[];
 extern const uint32_t g_recomp_rel_count;
 extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where it is now;
@@ -334,11 +336,19 @@ extern uint32_t g_rel_base[];  /* [module * REL_MAX_SECTIONS + section]: where i
 #define REL_HA(m, s, a) ((uint16_t)((REL_V(m, s, a) + 0x8000u) >> 16))
 uint32_t rels_canon(uint32_t a);
 /* Where a module's section is now: the address OSLink gave it, 0 while the module (by its
-   REL id) is not linked. For a game's own code that reads a module's data. */
+   REL id) is not linked. For a game's own code that reads a module's data. With modules
+   that share an id, the one of them that is linked. */
 uint32_t rels_section_address(uint32_t module_id, uint32_t section);
 void rels_linking(uint32_t module_info);
 void rels_linked(uint32_t module_info);
 void rels_unlinked(uint32_t module_info);
+
+/* A game's own setjmp/longjmp pair that switches stacks (jmp.txt; runtime/threads.cpp,
+   "Coroutines"): the setjmp's wrapper records the save after the original body ran, and
+   the longjmp's hands over to whoever saved the buffer, or starts it afresh with the
+   original body when the game wrote the buffer itself. */
+void coro_saved(CPU* c, uint32_t jmpbuf, uint32_t size);
+void coro_longjmp(CPU* c, void (*orig)(CPU*));
 
 void call_indirect(CPU* c, uint32_t addr);
 void unimpl(CPU* c, uint32_t pc, uint32_t inst);

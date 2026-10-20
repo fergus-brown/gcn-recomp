@@ -58,6 +58,10 @@ The game project provides:
   waiting for a runnable thread), where the runtime skips guest time to the next event.
 - `recomp/names.txt`, `recomp/patches.txt` — hand-named functions and instruction patches,
   usually empty.
+- `recomp/jmp.txt` — a game's own setjmp/longjmp pair that switches stacks, as
+  `<setjmp> <longjmp> <buffer size>`, for a game that runs cooperative tasks of its own
+  (each then runs on a host thread, as guest threads do: `runtime/threads.cpp`,
+  "Coroutines"); absent for most games.
 - `recomp/steps.txt` — the game's per-frame steps, for running it at another frame rate
   (`docs/diagnostics.md`, "Finding a game's per-frame steps"); absent for a game that
   does not try.

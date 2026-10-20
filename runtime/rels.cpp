@@ -43,6 +43,66 @@ int module_index(uint32_t id) {
     return -1;
 }
 
+bool id_shared(uint32_t id) {
+    int n = 0;
+    for (uint32_t k = 0; k < g_recomp_rel_count; k++)
+        if (g_recomp_rels[k].id == id && ++n > 1) return true;
+    return false;
+}
+
+// FNV-1a of the module's sections as the file holds them, as recomp/rel.py computes it:
+// only meaningful before the link, which patches them.
+uint64_t fingerprint(uint32_t info) {
+    const uint32_t nsec = LD32(info + 0x0C);
+    uint32_t table = LD32(info + 0x10);
+    if (table < 0x80000000u) table += info;
+    uint64_t h = 0xCBF29CE484222325ull;
+    for (uint32_t i = 0; i < nsec; i++) {
+        uint32_t off = LD32(table + i * 8) & ~1u;
+        const uint32_t size = LD32(table + i * 8 + 4);
+        if (!off || !size) continue;
+        if (off < 0x80000000u) off += info;
+        for (uint32_t j = 0; j < size; j++) h = (h ^ LD8(off + j)) * 0x100000001B3ull;
+    }
+    return h;
+}
+
+// Which recompiled module the one at `info` is, before it is linked: by its id, or, when
+// modules share that id, by its contents.
+int identify(uint32_t info) {
+    const uint32_t id = LD32(info);
+    if (!id_shared(id)) return module_index(id);
+    const uint64_t fp = fingerprint(info);
+    for (uint32_t k = 0; k < g_recomp_rel_count; k++)
+        if (g_recomp_rels[k].id == id && g_recomp_rels[k].fingerprint == fp) return (int)k;
+    return -1;
+}
+
+// The modules the game has handed to OSLink, by where their header is: identified before
+// the link, since the link changes what identifies them.
+struct Linked { uint32_t info; int module; };
+Linked g_linked[REL_MAX_MODULES];
+int g_linked_count = 0;
+
+void remember(uint32_t info, int k) {
+    for (int i = 0; i < g_linked_count; i++)
+        if (g_linked[i].info == info) { g_linked[i].module = k; return; }
+    if (g_linked_count == REL_MAX_MODULES) fatal("rels: too many modules linked");
+    g_linked[g_linked_count++] = {info, k};
+}
+
+int linked_module(uint32_t info) {
+    for (int i = 0; i < g_linked_count; i++)
+        if (g_linked[i].info == info) return g_linked[i].module;
+    const uint32_t id = LD32(info);
+    return id_shared(id) ? -1 : module_index(id);
+}
+
+void forget_linked(uint32_t info) {
+    for (int i = 0; i < g_linked_count; i++)
+        if (g_linked[i].info == info) { g_linked[i] = g_linked[--g_linked_count]; return; }
+}
+
 void forget(uint32_t info) {
     int n = g_live_count.load(std::memory_order_acquire);
     for (int i = 0; i < n; i++)
@@ -96,7 +156,9 @@ std::string module_name(uint32_t info) {
 // for the build to recompile (gcn_add_game's REL_RUNTIME); GCN_REL_DUMP_WANT=a,b ends the
 // run once those are written.
 void rels_linking(uint32_t info) {
-    if (module_index(LD32(info)) >= 0) return;
+    const int k = identify(info);
+    remember(info, k);
+    if (k >= 0) return;
     const char* dir = getenv("GCN_REL_DUMP");
     if (!dir) return;
     const std::string name = module_name(info);
@@ -125,7 +187,7 @@ void rels_linking(uint32_t info) {
 
 void rels_linked(uint32_t info) {
     const uint32_t id = LD32(info);
-    const int k = module_index(id);
+    const int k = linked_module(info);
     if (k < 0) {
         LOG(LOG_OS, "OSLink: module %u at %08X was not recompiled\n", id, info);
         return;
@@ -164,8 +226,9 @@ void rels_linked(uint32_t info) {
 }
 
 void rels_unlinked(uint32_t info) {
-    const int k = module_index(LD32(info));
+    const int k = linked_module(info);
     forget(info);
+    forget_linked(info);
     if (k >= 0) {
         for (uint32_t s = 0; s < REL_MAX_SECTIONS; s++) g_rel_base[k * REL_MAX_SECTIONS + s] = 0;
         LOG(LOG_OS, "OSUnlink: %s at %08X\n", g_recomp_rels[k].name, info);
@@ -173,7 +236,13 @@ void rels_unlinked(uint32_t info) {
 }
 
 uint32_t rels_section_address(uint32_t module_id, uint32_t section) {
-    const int k = module_index(module_id);
+    int k = module_index(module_id);
+    if (id_shared(module_id)) {
+        k = -1;
+        for (int i = 0; i < g_linked_count; i++)
+            if (g_linked[i].module >= 0 && g_recomp_rels[g_linked[i].module].id == module_id)
+                k = g_linked[i].module;
+    }
     if (k < 0 || section >= REL_MAX_SECTIONS) return 0;
     return g_rel_base[k * REL_MAX_SECTIONS + section];
 }

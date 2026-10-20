@@ -98,6 +98,19 @@ class Rel:
             self.imports.append((mod, relocs))
 
 
+def fingerprint(data, sections):
+    """FNV-1a (64-bit) of a module's sections as its file holds them, before any link:
+    runtime/rels.cpp computes the same from the module in guest memory to tell apart
+    modules that share an id. Sections without contents in the file (bss) are skipped."""
+    h = 0xCBF29CE484222325
+    for off, size, _ in sections:
+        if not off or not size:
+            continue
+        for b in data[off:off + size]:
+            h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
 def write_dol(path, sections, bss, entry):
     """sections: [(addr, bytes, is_text)]. At most 7 text and 11 data."""
     text = [s for s in sections if s[2]]
@@ -144,11 +157,21 @@ def link(in_dol, out_dol, symdir, paths):
                 missing = sorted(m for m, _ in r.imports if m and m not in have)
                 print(f'note: {r.name} left out: it imports from module(s) {missing}', file=sys.stderr)
         rels = keep
-    ids = {}
+    # Modules may share an id: a game that links one at a time can give every module the
+    # same one. An import naming the module's own id resolves to the module itself; an
+    # import from another module needs that module's id to be unique. The runtime tells
+    # modules that share an id apart by their contents (fingerprint, runtime/rels.cpp).
+    by_id = {}
     for r in rels:
-        if r.id in ids:
-            sys.exit(f'error: {r.name} and {ids[r.id].name} share module id {r.id}')
-        ids[r.id] = r
+        by_id.setdefault(r.id, []).append(r)
+
+    def imported(r, mod):
+        if mod == r.id:
+            return r
+        if len(by_id[mod]) > 1:
+            names = ', '.join(m.name for m in by_id[mod])
+            sys.exit(f'error: {r.name} imports from module {mod}, which {names} share')
+        return by_id[mod][0]
 
     # Canonical addresses for every section of every module.
     text_at, data_at, bss_at = TEXT_BASE, DATA_BASE, BSS_BASE
@@ -174,7 +197,7 @@ def link(in_dol, out_dol, symdir, paths):
                    for off, size, _ in r.sections]
 
     relocs = []  # (canonical addr, kind, module index, section, addend)
-    index = {r.id: k for k, r in enumerate(rels)}
+    index = {id(r): k for k, r in enumerate(rels)}
     for r in rels:
         for mod, entries in r.imports:
             for typ, sec, off, tsec, addend in entries:
@@ -185,7 +208,7 @@ def link(in_dol, out_dol, symdir, paths):
                 if mod == 0:
                     target = addend
                 else:
-                    target = ids[mod].canon[tsec] + addend
+                    target = imported(r, mod).canon[tsec] + addend
                 if typ == R_PPC_ADDR32:
                     struct.pack_into('>I', buf, off, target & 0xFFFFFFFF)
                 elif typ == R_PPC_REL32:
@@ -198,7 +221,7 @@ def link(in_dol, out_dol, symdir, paths):
                     if mod != 0 and r.sections[sec][2]:
                         kind = {R_PPC_ADDR16_LO: 'LO', R_PPC_ADDR16: 'LO',
                                 R_PPC_ADDR16_HI: 'HI', R_PPC_ADDR16_HA: 'HA'}[typ]
-                        relocs.append((where & ~3, kind, index[mod], tsec, addend))
+                        relocs.append((where & ~3, kind, index[id(imported(r, mod))], tsec, addend))
                 elif typ == R_PPC_REL24:
                     if not -0x2000000 <= target - where < 0x2000000:
                         sys.exit(f'error: {r.name}: branch at {where:08X} cannot reach {target:08X}')
@@ -235,12 +258,14 @@ def link(in_dol, out_dol, symdir, paths):
     write_dol(out_dol, secs, bss, entry)
 
     with open(out_dol + '.rels', 'w') as f:
-        f.write('# index id name prolog epilog unresolved; then per section: index canon size exec\n')
+        f.write('# index id name prolog epilog unresolved fingerprint; '
+                'then per section: index canon size exec\n')
         for k, r in enumerate(rels):
             def fn(sec, off):
                 return r.canon[sec] + off if sec else 0
             f.write(f'module {k} {r.id} {r.name} {fn(r.prolog_sec, r.prolog):X} '
-                    f'{fn(r.epilog_sec, r.epilog):X} {fn(r.unres_sec, r.unresolved):X}\n')
+                    f'{fn(r.epilog_sec, r.epilog):X} {fn(r.unres_sec, r.unresolved):X} '
+                    f'{fingerprint(r.data, r.sections):016X}\n')
             for s, (off, size, exe) in enumerate(r.sections):
                 if size:
                     f.write(f'section {s} {r.canon[s]:X} {size:X} {int(exe)}\n')
