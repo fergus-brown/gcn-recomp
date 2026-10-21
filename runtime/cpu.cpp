@@ -458,6 +458,14 @@ void clock_set_cpu_scale(double s) {
 }
 double clock_cpu_scale() { return (double)kTicksPerEdge / (double)g_ticks_per_edge; }
 
+static inline void cpu_relax_spin() {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
 void timing_init() {
     g_t0 = std::chrono::steady_clock::now();
 #ifdef _WIN32
@@ -472,6 +480,19 @@ void timing_init() {
     struct { unsigned long version, control_mask, state_mask; } throttle = {1, 0x1 /* EXECUTION_SPEED */, 0};
     SetProcessInformation(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &throttle, sizeof(throttle));
 #endif
+    // GCN_KEEP_AWAKE=1: a thread that only spins, so that the CPU never has every core
+    // idle at once. The guest, the GX front end, the transform workers and the guest's
+    // own host threads hand work to each other many times a frame, and on a laptop each
+    // hand-off to a thread on an idle core waited for that core to wake from a deep sleep
+    // state; with another program keeping a core busy, a busy scene's late frames fell
+    // from about 20% to 3%.
+    if (const char* e = getenv("GCN_KEEP_AWAKE"); e && atoi(e) != 0) {
+        std::thread([] {
+            for (;;) {
+                for (int i = 0; i < 1000; i++) cpu_relax_spin();
+            }
+        }).detach();
+    }
     if (const char* e = getenv("GCN_CLOCK")) g_virtual_clock = strcmp(e, "host") != 0;
     if (const char* e = getenv("GCN_TIMESCALE")) {
         double s = atof(e);

@@ -266,6 +266,7 @@ int main(int argc, char** argv) {
     // (netplay.h).
     int net_host_port = 0, net_players = 2, net_delay = 6;
     const char* net_join = nullptr;
+    int vsync_mode = -1;  // --vsync: -1 adaptive (the default), 1 on, 0 off
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
     int record_w = 2560, record_h = 1440;
@@ -294,6 +295,7 @@ int main(int argc, char** argv) {
         else if (!strncmp(argv[i], "--players=", 10)) net_players = atoi(argv[i] + 10);
         else if (!strncmp(argv[i], "--net-delay=", 12)) net_delay = atoi(argv[i] + 12);
         else if (!strncmp(argv[i], "--join=", 7)) net_join = argv[i] + 7;
+        else if (!strncmp(argv[i], "--vsync=", 8)) vsync_mode = !strcmp(argv[i] + 8, "adaptive") ? -1 : atoi(argv[i] + 8) ? 1 : 0;
         else if (!strcmp(argv[i], "--sample")) debug_sampler_start();
         else if (!strcmp(argv[i], "--no-music")) { void audio_mute_music(bool); audio_mute_music(true); }
         else if (!strncmp(argv[i], "--record=", 9)) record_to = argv[i] + 9;
@@ -415,7 +417,21 @@ int main(int argc, char** argv) {
         "  offers legacy OpenGL (\"GDI Generic\" 1.1, typical for a VM with no GL driver),\n"
         "  install a GL implementation that provides it -- see docs/dev/graphics.md.";
     if (!ctx) fatal("SDL_GL_CreateContext: %s\n%s", SDL_GetError(), kGLHelp);
-    SDL_GL_SetSwapInterval(0);
+    // Vsync, adaptive where the driver has it: a frame on time waits for the display's
+    // refresh rather than replacing the last one partway down the screen (tearing), and a
+    // late one is shown at once rather than held a whole refresh more. The game paces
+    // itself on its own clock either way. --vsync=0|1|adaptive chooses.
+    {
+        int want = vsync_mode;
+        if (want < 0 && SDL_GL_SetSwapInterval(-1) == 0) {
+            LOG(LOG_GX, "vsync: adaptive");
+        } else if (want != 0 && SDL_GL_SetSwapInterval(1) == 0) {
+            LOG(LOG_GX, "vsync: on");
+        } else {
+            SDL_GL_SetSwapInterval(0);
+            LOG(LOG_GX, "vsync: off");
+        }
+    }
     // A legacy driver still "loads": it resolves the GL 1.1 exports and leaves every
     // 2.0+ entry point null, so check the version before handing off to the renderer.
     int glver = gl_load_with(SDL_GL_GetProcAddress);
