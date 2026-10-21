@@ -115,11 +115,16 @@ uint64_t build_id() {
     return h;
 }
 
+// Ranges netplay_hash_exclude has taken out of the hash, as offsets into RAM.
+std::vector<std::pair<uint32_t, uint32_t>> g_hash_skip;
+
 uint64_t ram_hash() {
     uint64_t h = 1469598103934665603ull;
     for (uint32_t a = 0; a < RAM_SIZE; a += 8) {
         uint64_t v;
         memcpy(&v, HOST(0x80000000u + a), 8);
+        for (const auto& r : g_hash_skip)
+            if (a + 8 > r.first && a < r.second) v = 0;
         h = (h ^ v) * 0x100000001B3ull;
         h ^= h >> 29;
     }
@@ -364,6 +369,11 @@ void lost(const char* who) {
 }  // namespace
 
 bool netplay_active() { return g_role != Role::None; }
+
+void netplay_hash_exclude(uint32_t addr, uint32_t size) {
+    const uint32_t off = addr - 0x80000000u;
+    g_hash_skip.emplace_back(off, off + size);
+}
 
 bool netplay_host(int port, int players, int delay, const std::string& card) {
     if (players < 2 || players > kMaxPlayers) {

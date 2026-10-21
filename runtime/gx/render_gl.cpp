@@ -1331,16 +1331,21 @@ void render_set_internal_scale(int scale) {
 
 // The output's aspect (4:3 = 1.333, 16:9, 21:9): the EFB is made as much wider, and the
 // picture presented at it. See g_wide.
+// What render_aspect reports: read from the guest's thread (a game's HUD hook), so not
+// g_wide itself, which the renderer's thread owns.
+static std::atomic<double> g_aspect_pub{4.0 / 3.0};
+
 void render_set_aspect(double aspect) {
     double w = aspect > 0.0 ? aspect / (4.0 / 3.0) : 1.0;
     if (w < 1.0) w = 1.0;
     if (w > 3.0) w = 3.0;
+    g_aspect_pub.store(4.0 / 3.0 * w, std::memory_order_relaxed);
     if (std::fabs(w - g_wide) < 1e-6) return;
     const int ow = efb_pw(), oh = EFB_H * g_scale;
     g_wide = w;
     if (g_efb_color) efb_resize(ow, oh);
 }
-double render_aspect() { return 4.0 / 3.0 * g_wide; }
+double render_aspect() { return g_aspect_pub.load(std::memory_order_relaxed); }
 
 static void efb_resize(int ow, int oh) {
     xfbs_drop();
@@ -2611,8 +2616,12 @@ static void apply_state(const PixelState& st, int prim) {
             glDisable(GL_SCISSOR_TEST);
         } else {
             glEnable(GL_SCISSOR_TEST);
-            // A 2D draw's is taken about the picture's centre with it (g_xk_scr).
-            const double c = EFB_W * 0.5, sx0 = c + (x0 - c) * g_xk_scr, sx1 = c + (x1 - c) * g_xk_scr;
+            // A 2D draw's is taken about the picture's centre with it (g_xk_scr), unless it
+            // spans the whole width: that one clips nothing in 4:3, and is left open to the
+            // whole widened picture, where a game's hook may have moved 2D out to the edges.
+            const bool whole = x0 <= 0 && x1 >= EFB_W;
+            const double c = EFB_W * 0.5, sx0 = whole ? 0.0 : c + (x0 - c) * g_xk_scr,
+                         sx1 = whole ? EFB_W : c + (x1 - c) * g_xk_scr;
             glScissor(efb_px(sx0), (EFB_H - y1) * g_scale, efb_px(sx1) - efb_px(sx0), (y1 - y0) * g_scale);
         }
     }

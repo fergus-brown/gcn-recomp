@@ -62,6 +62,9 @@ void render_set_internal_scale(int scale);
 // out at the sides and 2D keeps its size in the middle, apart from layers over the whole
 // picture, which fill it (classify_wide in render_gl.cpp). Between frames, as the scale.
 void render_set_aspect(double aspect);
+// The aspect last set; safe to call from any thread (a game hook that moves its HUD out to
+// the edges reads it on the guest's). A 2D draw whose scissor spans the whole 640 is
+// unclipped across the whole widened picture, so such a hook can put 2D there.
 double render_aspect();
 
 void render_set_window_size(int w, int h);

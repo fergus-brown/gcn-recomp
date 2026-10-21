@@ -46,3 +46,8 @@ void netplay_tick(const PadState& local);
 
 // The state channel `chan` reads this tick. True while a session is in progress.
 bool netplay_pad(int chan, PadState& s);
+
+// Leave [addr, addr + size) of guest RAM out of the desync hash: memory a game's hook writes
+// for the picture alone, which peers drawing differently (one at 16:9, one at 4:3) hold
+// differently without having diverged. Call before the session starts.
+void netplay_hash_exclude(uint32_t addr, uint32_t size);
