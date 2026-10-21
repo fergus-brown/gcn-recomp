@@ -420,7 +420,10 @@ function(gcn_add_game)
     set(GLAD_INCLUDE_DIR ${RT}/gx/glad_es/include)
     set(GLAD_SOURCE ${RT}/gx/glad_es/src/gles2.c)
     set(GCN_GL_DEFS GCN_GL_ES)
-    if(GCN_VISIONOS)
+    # GL ES 3.0, with the renderer's fallbacks for what it otherwise takes from 3.2: ANGLE
+    # on Metal (visionOS), and the Android emulator, whose GL ES stops at 3.1.
+    option(GCN_GL_ES30 "Target OpenGL ES 3.0 (ANGLE on Metal, the Android emulator)" OFF)
+    if(GCN_VISIONOS OR GCN_GL_ES30)
       list(APPEND GCN_GL_DEFS GCN_GL_ES30)
     endif()
   else()

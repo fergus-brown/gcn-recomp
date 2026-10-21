@@ -69,7 +69,9 @@ $strip = Get-ChildItem "$sdk\ndk" -Directory -ErrorAction SilentlyContinue | Sor
          ForEach-Object { Join-Path $_.FullName 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe' } |
          Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($strip) {
-    $stripped = Join-Path $out "lib$Name.so"
+    # Absolute: the zip below is .NET's, which resolves a relative path against the
+    # process's directory, not PowerShell's.
+    $stripped = Join-Path (Resolve-Path $out).Path "lib$Name.so"
     & $strip --strip-debug -o $stripped $lib
     if ($LASTEXITCODE -eq 0) { $lib = $stripped }
 }

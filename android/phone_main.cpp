@@ -104,9 +104,14 @@ bool egl_init() {
     };
     EGLint n = 0;
     if (!eglChooseConfig(g_dpy, cfg_attr, &g_cfg, 1, &n) || n < 1) { LOGE("no ES3 config"); return false; }
-    const EGLint ctx_attr[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 2, EGL_NONE};
+    // The version the renderer was built for (gx/gl.h): 3.2, or 3.0 with GCN_GL_ES30.
+    const EGLint ctx_attr[] = {EGL_CONTEXT_MAJOR_VERSION, GCN_GL_MAJOR, EGL_CONTEXT_MINOR_VERSION, GCN_GL_MINOR, EGL_NONE};
     g_ctx = eglCreateContext(g_dpy, g_cfg, EGL_NO_CONTEXT, ctx_attr);
-    if (g_ctx == EGL_NO_CONTEXT) { LOGE("eglCreateContext failed"); return false; }
+    if (g_ctx == EGL_NO_CONTEXT) {
+        LOGE("eglCreateContext failed: this device has no GL ES %d.%d (an emulator stops at 3.1: build with "
+             "-DGCN_GL_ES30=ON)", GCN_GL_MAJOR, GCN_GL_MINOR);
+        return false;
+    }
     // A pbuffer to keep the context current with while there is no window.
     const EGLint pb[] = {EGL_WIDTH, 16, EGL_HEIGHT, 16, EGL_NONE};
     g_pbuf = eglCreatePbufferSurface(g_dpy, g_cfg, pb);
