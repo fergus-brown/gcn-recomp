@@ -376,7 +376,7 @@ void hle_stswi(CPU* c, uint32_t ea, int rs, int n);
    format never uses. */
 void psq_load_quantised(CPU* c, uint32_t ea, int frd, int w, int gqr);
 void psq_store_quantised(CPU* c, uint32_t ea, int frs, int w, int gqr);
-static inline void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
+static GCN_ALWAYS_INLINE void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
     if (LIKELY(((c->gqr[gqr] >> 16) & 7) < 4)) {
         c->f[frd].d = LDF32(ea);
         c->ps1[frd] = w ? 1.0 : LDF32(ea + 4);
@@ -384,7 +384,7 @@ static inline void psq_load(CPU* c, uint32_t ea, int frd, int w, int gqr) {
     }
     psq_load_quantised(c, ea, frd, w, gqr);
 }
-static inline void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr) {
+static GCN_ALWAYS_INLINE void psq_store(CPU* c, uint32_t ea, int frs, int w, int gqr) {
     if (LIKELY((c->gqr[gqr] & 7) < 4)) {
         STF32(ea, c->f[frs].d);
         if (!w) STF32(ea + 4, c->ps1[frs]);

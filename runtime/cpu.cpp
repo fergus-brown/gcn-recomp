@@ -74,10 +74,39 @@ void fatal(const char* fmt, ...) {
     abort();
 }
 
+// The generated code was compiled for the CPU's FMA instruction (GCN_X86_FMA, CMakeLists):
+// on a CPU without it the first multiply-add is an illegal instruction, so say why first.
+#if defined(GCN_X86_FMA)
+#if defined(_WIN32)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+static void cpu_check_fma() {
+    unsigned r[4];
+#if defined(_WIN32)
+    int i[4];
+    __cpuid(i, 1);
+    for (int k = 0; k < 4; k++) r[k] = (unsigned)i[k];
+#else
+    __get_cpuid(1, &r[0], &r[1], &r[2], &r[3]);
+#endif
+    const bool fma = (r[2] >> 12) & 1, osxsave = (r[2] >> 27) & 1, avx = (r[2] >> 28) & 1;
+    // The OS has to save the AVX registers too, or the instructions fault anyway.
+    const bool os_avx = osxsave && (_xgetbv(0) & 6) == 6;
+    if (!(fma && avx && os_avx))
+        fatal("this build needs a CPU with FMA (Intel Haswell or AMD Piledriver, 2013, and later); "
+              "rebuild with -DGCN_X86_FMA=OFF to run on this one");
+}
+#else
+static void cpu_check_fma() {}
+#endif
+
 // ---------------------------------------------------------------------------
 // Memory: reserve 1GB, commit RAM at 0 and locked cache at 0x20000000.
 // ---------------------------------------------------------------------------
 void mem_init() {
+    cpu_check_fma();
     const size_t reserve = 0x40000000;
 #ifdef GCN_MEM_BASE
     // See GCN_MEM in recomp.h: the generated code was compiled for this address.

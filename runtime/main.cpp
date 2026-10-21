@@ -235,6 +235,17 @@ static bool pump_events() {
     return running;
 }
 
+#ifdef _WIN32
+// A laptop with two GPUs gives a program it does not know the integrated one, which
+// rendered a busy scene at well under the frame rate the discrete GPU beside it managed.
+// The NVIDIA and AMD drivers look for these exports in the executable and use the
+// discrete GPU for a program that has them.
+extern "C" {
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+}
+#endif
+
 // ---------------------------------------------------------------------------
 int main(int argc, char** argv) {
     // The game resetting the console starts it again in a fresh process, as a power cycle

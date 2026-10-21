@@ -17,6 +17,7 @@
 /* MSVC has no branch-probability hint; the condition still has to evaluate. */
 #define GCN_LIKELY(x) (!!(x))
 #define GCN_UNLIKELY(x) (!!(x))
+#define GCN_ALWAYS_INLINE __forceinline
 
 #define GCN_PRINTF_FMT(fmt_idx, first_arg)
 /* COFF has no weak symbols in the ELF sense. Nothing overrides these today, so a
@@ -36,6 +37,10 @@ static __inline uint32_t GCN_CLZ32(uint32_t v) {
 
 #define GCN_LIKELY(x) __builtin_expect(!!(x), 1)
 #define GCN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+/* For the small helpers the generated code calls at nearly every instruction: in a file of
+   thousands of recompiled functions the optimizer stops inlining them, and a call per
+   paired-single store was 6% of a guest thread's time. */
+#define GCN_ALWAYS_INLINE inline __attribute__((always_inline))
 
 #define GCN_PRINTF_FMT(fmt_idx, first_arg) __attribute__((format(printf, fmt_idx, first_arg)))
 

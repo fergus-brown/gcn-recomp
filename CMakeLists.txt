@@ -17,6 +17,7 @@ option(GCN_BENCH_ONLY "Build only the headless benchmark (no SDL2, no renderer)"
 # See ENTER()/RET() in runtime/recomp.h. ON maintains a guest call stack, which answers
 # "which guest function did that?" and gives a crash dump something to print.
 option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
+option(GCN_X86_FMA "x86-64: the CPU's FMA instruction for the generated code's fma() (CPUs from 2013 on)" ON)
 option(GCN_ANDROID_PHONE "On Android, build the phone and tablet app (android/phone_main.cpp), not the headset's" OFF)
 option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every poll, DMA and frame (diagnostics)" OFF)
 
@@ -376,6 +377,16 @@ function(gcn_add_game)
     else()
       target_compile_options(game_recomp PRIVATE -O2 -fno-strict-aliasing -Wno-unused-label -Wno-unused-variable
                              -Wno-parentheses-equality -ffp-contract=off)
+      # Every paired-single and floating multiply-add is an fma() call (recomp/ppc.py). On
+      # x86-64 without -mfma that is a call into the C library, which on Windows computes
+      # it in software: two calls per ps_madd, most of a matrix routine's time. The CPU's
+      # own instruction rounds exactly as fma() does, so results (and a replay, or a
+      # session's peers) are unchanged. It needs an x86-64 CPU from 2013 on (Haswell,
+      # Piledriver); the frontend says so and stops on one without (cpu_check_fma).
+      if(GCN_X86_FMA AND CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|x86_64" AND NOT ANDROID)
+        target_compile_options(game_recomp PRIVATE -mfma)
+        target_compile_definitions(game_recomp PUBLIC GCN_X86_FMA)
+      endif()
       # Line tables only, where the build has debug info at all: a crash's frames still
       # resolve to a line (addr2line, a symbolized backtrace), and nobody reads a
       # recompiled function's locals. Full debug info took about 15% longer to compile and
@@ -479,8 +490,8 @@ function(gcn_add_game)
     list(APPEND GCN_PLATFORM_LIBS "-framework OpenGL")
   elseif(WIN32)
     # opengl32 for the GL entry points, dbghelp to symbolize crash backtraces, ws2_32 for
-    # telemetry's socket.
-    list(APPEND GCN_PLATFORM_LIBS opengl32 dbghelp ws2_32)
+    # telemetry's and netplay's sockets, winmm for the profiler's timer (host_profile.cpp).
+    list(APPEND GCN_PLATFORM_LIBS opengl32 dbghelp ws2_32 winmm)
   else()
     find_package(OpenGL REQUIRED)
     list(APPEND GCN_PLATFORM_LIBS OpenGL::GL)
@@ -533,7 +544,7 @@ function(gcn_add_game)
     target_compile_options(${G_NAME}_bench PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME}_bench PRIVATE ${GCN_GAME_DEFS} ${GCN_ENTRY_DEFS})
     if(WIN32)
-      target_link_libraries(${G_NAME}_bench PRIVATE dbghelp ws2_32)
+      target_link_libraries(${G_NAME}_bench PRIVATE dbghelp ws2_32 winmm)
     endif()
   endif()
 
