@@ -20,9 +20,15 @@ param(
 $ErrorActionPreference = 'Continue'
 
 $sdk = "$env:LOCALAPPDATA\Android\Sdk"
-$env:JAVA_HOME = (Get-ChildItem "$env:ProgramFiles\Microsoft" -Directory -ErrorAction SilentlyContinue |
-                  Where-Object Name -match 'jdk' | Select-Object -Last 1).FullName
-if (-not $env:JAVA_HOME) { throw "No JDK found under $env:ProgramFiles\Microsoft (winget install Microsoft.OpenJDK.21)." }
+# A JDK: JAVA_HOME when it is set, else Microsoft's installed one, else one unzipped under
+# %LOCALAPPDATA%\Programs\jdk (which needs no administrator).
+if (-not ($env:JAVA_HOME -and (Test-Path "$env:JAVA_HOME\bin\keytool.exe"))) {
+    $env:JAVA_HOME = (@(Get-ChildItem "$env:ProgramFiles\Microsoft" -Directory -ErrorAction SilentlyContinue) +
+                      @(Get-ChildItem "$env:LOCALAPPDATA\Programs\jdk" -Directory -ErrorAction SilentlyContinue) |
+                      Where-Object { $_.Name -match 'jdk' -and (Test-Path "$($_.FullName)\bin\keytool.exe") } |
+                      Select-Object -Last 1).FullName
+}
+if (-not $env:JAVA_HOME) { throw "No JDK found: set JAVA_HOME, or winget install Microsoft.OpenJDK.21." }
 
 $bt = Get-ChildItem "$sdk\build-tools" -Directory -ErrorAction SilentlyContinue |
       Sort-Object Name -Descending | Select-Object -First 1
@@ -54,16 +60,29 @@ foreach ($f in $unsigned, $aligned, $signed) { if (Test-Path $f) { Remove-Item $
     --min-sdk-version 29 --target-sdk-version 34
 if ($LASTEXITCODE -ne 0) { throw "aapt2 link failed" }
 
-# 2. Add the native libraries: ours, plus the OpenXR loader it links against, which
-#    FetchContent unpacked from the Khronos AAR.
-$libs = @{ "lib/$Abi/lib$Name.so" = (Resolve-Path $so).Path }
-$loader = Get-ChildItem -Recurse -Filter 'libopenxr_loader.so' "$BuildDir/_deps" -ErrorAction SilentlyContinue |
-          Where-Object { $_.FullName -match [regex]::Escape($Abi) } | Select-Object -First 1
-if ($loader) {
-    $libs["lib/$Abi/libopenxr_loader.so"] = $loader.FullName
-    Write-Host "bundling $($loader.Name)"
-} else {
-    Write-Warning "libopenxr_loader.so not found under $BuildDir/_deps - the app will fail to load"
+# 2. Add the native libraries: ours, stripped of its debug information (the build's own
+#    copy keeps it, for symbolizing a crash), plus, for the headset app, the OpenXR loader
+#    it links against, which FetchContent unpacked from the Khronos AAR. The phone app
+#    (GCN_ANDROID_PHONE) has none.
+$lib = (Resolve-Path $so).Path
+$strip = Get-ChildItem "$sdk\ndk" -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending |
+         ForEach-Object { Join-Path $_.FullName 'toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe' } |
+         Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($strip) {
+    $stripped = Join-Path $out "lib$Name.so"
+    & $strip --strip-debug -o $stripped $lib
+    if ($LASTEXITCODE -eq 0) { $lib = $stripped }
+}
+$libs = @{ "lib/$Abi/lib$Name.so" = $lib }
+if (Select-String -Path $manifest -Pattern 'openxr' -Quiet) {
+    $loader = Get-ChildItem -Recurse -Filter 'libopenxr_loader.so' "$BuildDir/_deps" -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match [regex]::Escape($Abi) } | Select-Object -First 1
+    if ($loader) {
+        $libs["lib/$Abi/libopenxr_loader.so"] = $loader.FullName
+        Write-Host "bundling $($loader.Name)"
+    } else {
+        Write-Warning "libopenxr_loader.so not found under $BuildDir/_deps - the app will fail to load"
+    }
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -118,5 +137,9 @@ if ($have -ne "$($iso.Length)") {
 }
 
 Write-Host ""
-Write-Host "Installed. On the headset: Library -> Unknown Sources -> $Title"
+if (Select-String -Path $manifest -Pattern 'openxr' -Quiet) {
+    Write-Host "Installed. On the headset: Library -> Unknown Sources -> $Title"
+} else {
+    Write-Host "Installed: $Title is in the device's app list."
+}
 Write-Host "Logs:  adb logcat -s $Name"

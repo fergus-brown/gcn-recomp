@@ -17,6 +17,7 @@ option(GCN_BENCH_ONLY "Build only the headless benchmark (no SDL2, no renderer)"
 # See ENTER()/RET() in runtime/recomp.h. ON maintains a guest call stack, which answers
 # "which guest function did that?" and gives a crash dump something to print.
 option(GCN_TRACE_CALLS "Maintain a guest call stack (diagnostics)" OFF)
+option(GCN_ANDROID_PHONE "On Android, build the phone and tablet app (android/phone_main.cpp), not the headset's" OFF)
 option(GCN_GUEST_CHECKS "Call the game project's consistency checks at every poll, DMA and frame (diagnostics)" OFF)
 
 # PC VR: the desktop executable's --vr. Windows only for now: the frontend binds OpenXR to
@@ -603,6 +604,27 @@ function(gcn_add_game)
     target_compile_options(${G_NAME}_egl PRIVATE ${GCN_RUNTIME_WARNINGS})
     target_compile_definitions(${G_NAME}_egl PRIVATE ${ANDROID_DEFS} ${GCN_ENTRY_DEFS})
 
+    add_library(native_app_glue STATIC
+      ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
+    target_include_directories(native_app_glue PUBLIC
+      ${ANDROID_NDK}/sources/android/native_app_glue)
+
+    # GCN_ANDROID_PHONE: the app for a phone or tablet instead of the headset -- the game on
+    # the device's screen with a gamepad or on-screen controls (android/phone_main.cpp), no
+    # OpenXR. Same library name and package, so package-apk.ps1 packages either.
+    if(GCN_ANDROID_PHONE)
+      add_library(${G_NAME} SHARED ${AND_DIR}/phone_main.cpp)
+      _gcn_set_standards(${G_NAME})
+      target_include_directories(${G_NAME} PRIVATE ${AND_DIR} ${RT} ${RECOMP_GEN_DIR} ${GLAD_INCLUDE_DIR})
+      target_link_libraries(${G_NAME} PRIVATE gcn_core ${G_NAME}_android game_recomp native_app_glue EGL android log aaudio)
+      target_compile_options(${G_NAME} PRIVATE ${GCN_RUNTIME_WARNINGS})
+      set(APP_DEFS ${ANDROID_DEFS} ${GCN_ENTRY_DEFS})
+      list(FILTER APP_DEFS EXCLUDE REGEX "^GCN_DEFAULT_ISO=")
+      target_compile_definitions(${G_NAME} PRIVATE ${APP_DEFS} GCN_DEFAULT_ISO="")
+      target_link_options(${G_NAME} PRIVATE -u ANativeActivity_onCreate)
+      configure_file(${AND_DIR}/AndroidManifest_phone.xml.in ${CMAKE_BINARY_DIR}/AndroidManifest.xml @ONLY)
+    else()
+
     include(FetchContent)
     FetchContent_Declare(openxr_aar
       URL https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/1.1.63/openxr_loader_for_android-1.1.63.aar
@@ -611,11 +633,6 @@ function(gcn_add_game)
     FetchContent_MakeAvailable(openxr_aar)
     set(OPENXR_INCLUDE ${openxr_aar_SOURCE_DIR}/prefab/modules/headers/include)
     set(OPENXR_LIB ${openxr_aar_SOURCE_DIR}/prefab/modules/openxr_loader/libs/android.${ANDROID_ABI}/libopenxr_loader.so)
-
-    add_library(native_app_glue STATIC
-      ${ANDROID_NDK}/sources/android/native_app_glue/android_native_app_glue.c)
-    target_include_directories(native_app_glue PUBLIC
-      ${ANDROID_NDK}/sources/android/native_app_glue)
 
     # The installable app: android.app.NativeActivity loads lib<name>.so and calls
     # android_main(), so there is no Java source at all. The library name must match the
@@ -633,6 +650,7 @@ function(gcn_add_game)
     target_link_options(${G_NAME} PRIVATE -u ANativeActivity_onCreate)
 
     configure_file(${AND_DIR}/AndroidManifest.xml.in ${CMAKE_BINARY_DIR}/AndroidManifest.xml @ONLY)
+    endif()
   endif()
 
   # ---- Vision Pro app ----
