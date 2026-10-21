@@ -3,6 +3,12 @@
 #include "gl.h"
 #include <cstring>
 
+#if !defined(__APPLE__) && !defined(GCN_GL_ES)
+PFN_gcn_glGetProgramBinary gcn_glGetProgramBinary;
+PFN_gcn_glProgramBinary gcn_glProgramBinary;
+PFN_gcn_glProgramParameteri gcn_glProgramParameteri;
+#endif
+
 int gl_load_with(GLLoadProc proc) {
 #if defined(__APPLE__) && !defined(GCN_GL_ES)
     (void)proc;
@@ -26,6 +32,11 @@ int gl_load_with(GLLoadProc proc) {
     }
 #else
     v = gladLoadGL((GLADloadfunc)proc);
+    // Program binaries (GL 4.1, ARB_get_program_binary) are past what the loader was
+    // generated for, so they are resolved here; null where the context lacks them.
+    gcn_glGetProgramBinary = (PFN_gcn_glGetProgramBinary)proc("glGetProgramBinary");
+    gcn_glProgramBinary = (PFN_gcn_glProgramBinary)proc("glProgramBinary");
+    gcn_glProgramParameteri = (PFN_gcn_glProgramParameteri)proc("glProgramParameteri");
 #endif
     if (!v) return 0;
     return GLAD_VERSION_MAJOR(v) * 10 + GLAD_VERSION_MINOR(v);

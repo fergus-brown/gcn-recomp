@@ -32,11 +32,20 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total);
 // visible freeze; this trades it for something appearing a few frames late, the first
 // time it is seen. Set before render_init; GCN_ASYNC_SHADERS=0 or 1 overrides it.
 void render_set_async_shaders(bool on);
+// Where the GL cannot build in parallel itself (a desktop driver), `n` GL contexts in the
+// renderer's share group for it to build programs on, one per thread: `bind(i)` makes the
+// i-th current on the calling thread and says whether it could. The load then builds every
+// program it has to compile across them together, and with render_set_async_shaders a
+// program needed in play is built on one while its draws are left out. Set before
+// render_init.
+using CompileContextFn = bool (*)(int worker);
+void render_set_compile_workers(int n, CompileContextFn bind);
 // Keys a game ships (gcn_add_game's SHADER_KEYS, made by tools/shader_keys.cpp), built
 // with the cache's own the first time: on a fresh install the programs a play-through
 // needs are compiled before the game starts rather than in the middle of play, and from
-// then on come back as binaries with the rest. Only where the GL keeps program binaries:
-// elsewhere they would be compiled again on every run. `data` must outlive render_init.
+// then on come back as binaries with the rest; where the GL keeps none (desktop GL) they
+// are compiled at every start with the cache's records, on the compile workers when there
+// are some. `data` must outlive render_init.
 // Set from a static constructor, so it only stores the pointer.
 void render_set_shader_keys(const void* data, size_t size);
 // After render_init: whether building the cache will compile its programs from source,

@@ -8,7 +8,13 @@
 #include "shadergen.h"
 #include "gl.h"
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -414,12 +420,11 @@ static GLuint link(GLuint vs, GLuint fs) {
 // and each record a hash of the GLSL its key generates, and either changing drops back
 // to compiling that record and rewriting the file.
 // ---------------------------------------------------------------------------
-#if defined(GCN_GL_ES) || defined(__APPLE__)
+// Everywhere: desktop GL resolves the 4.1 entry points itself (gx/gl.h), and a context
+// without them reports no binary formats, so the cache compiles as it did. On NVIDIA's
+// desktop driver a program took 110-270 ms to build, a list of 79 over 20 s at every
+// start; restored from binaries they take about a millisecond each.
 #define GCN_HAVE_PROGRAM_BINARY 1
-#else
-// The desktop glad loader stops at 3.3; program binaries are 4.1.
-#define GCN_HAVE_PROGRAM_BINARY 0
-#endif
 
 static std::string g_shader_cache_path;
 static bool g_binaries_supported = false;
@@ -638,6 +643,110 @@ static bool cache_next(const uint8_t*& p, const uint8_t* end, CacheRecord& r) {
     return true;
 }
 
+// ---- Compile workers (render_set_compile_workers) ----
+// A desktop driver compiles a program on the thread that asks, and a cold NVIDIA build of
+// one of these took about 270 ms: a scene's first appearance stopped the frame for half a
+// second, and building a game's key list at a fresh install's first start took 20 s. With
+// no KHR_parallel_shader_compile to hand the work to, the frontend gives the renderer GL
+// contexts in its share group, and threads of the renderer's own build programs on them:
+// in play a program not yet built leaves its draws out until it is (as the extension's
+// path does), and at load every program to be compiled is built across all of them.
+struct CompileJob {
+    std::string src;
+    GLuint prog = 0, fs = 0;
+    std::atomic<bool> done{false};
+};
+static std::vector<std::thread> g_compile_threads;
+static std::mutex g_job_mutex;
+static std::condition_variable g_job_cv;
+static std::deque<std::shared_ptr<CompileJob>> g_jobs;
+static CompileContextFn g_compile_bind;
+static int g_compile_wanted = 0;
+static std::atomic<int> g_compile_ready{0};  // workers whose context is current
+
+void render_set_compile_workers(int n, CompileContextFn bind) {
+    g_compile_wanted = n;
+    g_compile_bind = bind;
+}
+
+static void compile_worker(int index) {
+    if (!g_compile_bind || !g_compile_bind(index)) {
+        fprintf(stderr, "[shaders] compile worker %d has no GL context\n", index);
+        return;
+    }
+    g_compile_ready++;
+    for (;;) {
+        std::shared_ptr<CompileJob> job;
+        {
+            std::unique_lock<std::mutex> lk(g_job_mutex);
+            g_job_cv.wait(lk, [] { return !g_jobs.empty(); });
+            job = g_jobs.front();
+            g_jobs.pop_front();
+        }
+        GLuint fs = glCreateShader(GL_FRAGMENT_SHADER);
+        const char* text = job->src.c_str();
+        glShaderSource(fs, 1, &text, nullptr);
+        glCompileShader(fs);
+        GLuint p = glCreateProgram();
+        glAttachShader(p, g_vs);
+        glAttachShader(p, fs);
+        glBindAttribLocation(p, 0, "a_pos");
+#if GCN_HAVE_PROGRAM_BINARY
+        if (g_binaries_supported) glProgramParameteri(p, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+#endif
+        glLinkProgram(p);
+        GLint ok = 0;
+        glGetProgramiv(p, GL_LINK_STATUS, &ok);  // waits for the build
+        // Done here before another context may use it: objects a context changed are only
+        // certain to look changed to another after the first has finished with them.
+        glFinish();
+        job->fs = fs;
+        job->prog = p;
+        job->done.store(true, std::memory_order_release);
+    }
+}
+
+static bool compile_workers_on() { return g_compile_ready.load() > 0; }
+
+static std::shared_ptr<CompileJob> compile_submit(std::string src) {
+    auto job = std::make_shared<CompileJob>();
+    job->src = std::move(src);
+    {
+        std::lock_guard<std::mutex> lk(g_job_mutex);
+        g_jobs.push_back(job);
+    }
+    g_job_cv.notify_one();
+    return job;
+}
+
+static void compile_workers_start() {
+    // GCN_COMPILE_WORKERS=N uses at most N of the frontend's contexts; 0, none.
+    if (const char* e = getenv("GCN_COMPILE_WORKERS")) g_compile_wanted = std::min(g_compile_wanted, atoi(e));
+    if (g_compile_wanted <= 0 || !g_compile_bind || !g_compile_threads.empty()) return;
+    for (int i = 0; i < g_compile_wanted; i++) g_compile_threads.emplace_back(compile_worker, i);
+    for (auto& t : g_compile_threads) t.detach();
+    // Each makes its context current first; wait for them so the load below can use them.
+    const auto t0 = std::chrono::steady_clock::now();
+    while (g_compile_ready.load() < g_compile_wanted && ms_since(t0) < 2000.0)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    fprintf(stderr, "[shaders] %d compile workers\n", g_compile_ready.load());
+}
+
+// The load's programs that have to be compiled, handed to the workers together and taken
+// back, in order, once they all have been (render_shader_cache_step).
+static std::vector<std::pair<ShaderKey, std::shared_ptr<CompileJob>>> g_load_batch;
+static std::unordered_set<ShaderKey, ShaderKeyHash> g_load_batch_keys;
+
+static void load_batch_finish() {
+    for (auto& [k, job] : g_load_batch) {
+        while (!job->done.load(std::memory_order_acquire)) std::this_thread::sleep_for(std::chrono::microseconds(200));
+        finish_program(job->prog, job->fs, job->src);
+        register_program(k, job->prog);
+    }
+    g_load_batch.clear();
+    g_load_batch_keys.clear();
+}
+
 static void shader_cache_open() {
     CacheLoad& L = g_cache_load;
     L = CacheLoad{};
@@ -694,7 +803,12 @@ static void shader_cache_open() {
             }
         }
     }
-    if (g_shipped_keys && g_binaries_supported) {
+    // Where the GL keeps no binaries (desktop GL here) the list is compiled at every start,
+    // as the cache's own records are: a few milliseconds a program at load, against tens
+    // of milliseconds each, and half-second stalls, when a scene first needs them in play.
+    // GCN_SHADER_KEYS=0 leaves the list out, to see what a program nothing knew of does.
+    const bool keys_off = getenv("GCN_SHADER_KEYS") && atoi(getenv("GCN_SHADER_KEYS")) == 0;
+    if (g_shipped_keys && !keys_off) {
         uint32_t kmagic = 0, kver = 0;
         if (g_shipped_keys_size >= 8) {
             memcpy(&kmagic, g_shipped_keys, 4);
@@ -734,7 +848,7 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
             // all but the first are dropped, and the rewrite keeps one. A binary stays good
             // under its canonical key: the source it was built from is the same.
             canonicalize_shader_key(r.k);
-            if (g_programs.count(r.k)) {
+            if (g_programs.count(r.k) || g_load_batch_keys.count(r.k)) {
                 L.stale = true;  // a duplicate: written by a crash mid-append, or see above
             } else {
                 const auto t_rec = std::chrono::steady_clock::now();
@@ -743,12 +857,18 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
                 GLuint prog = bin_ok ? build_program(r.k, src, r.bin, r.fmt, r.len) : 0;
                 if (prog) {
                     L.from_binary++;
+                    register_program(r.k, prog);
+                } else if (compile_workers_on()) {
+                    g_load_batch.push_back({r.k, compile_submit(std::move(src))});
+                    g_load_batch_keys.insert(r.k);
+                    L.compiled++;
+                    L.stale = true;
                 } else {
                     prog = build_program(r.k, src, nullptr, 0, 0);
                     L.compiled++;
                     L.stale = true;
+                    register_program(r.k, prog);
                 }
-                register_program(r.k, prog);
                 // A load that hangs or crawls says where.
                 const double rec_ms = ms_since(t_rec);
                 if (rec_ms > 100.0)
@@ -767,12 +887,18 @@ bool render_shader_cache_step(double budget_ms, int* done, int* total) {
         while (p >= end && L.shipped_pos < L.shipped.size() && ms_since(t_step) < budget_ms) {
             const ShaderKey& k = L.shipped[L.shipped_pos++];
             L.done++;
-            if (g_programs.count(k)) continue;
-            register_program(k, build_program(k, gen_pixel_shader(k), nullptr, 0, 0));
+            if (g_programs.count(k) || g_load_batch_keys.count(k)) continue;
+            if (compile_workers_on()) {
+                g_load_batch.push_back({k, compile_submit(gen_pixel_shader(k))});
+                g_load_batch_keys.insert(k);
+            } else {
+                register_program(k, build_program(k, gen_pixel_shader(k), nullptr, 0, 0));
+            }
             L.compiled++;
             L.stale = true;
         }
         if (p >= end && L.shipped_pos == L.shipped.size()) {
+            load_batch_finish();
             // Anything that could not be used as stored is replaced: the whole file is
             // rewritten from the programs now in hand, with fresh binaries where the
             // driver gives them.
@@ -818,11 +944,13 @@ static void shader_cache_append(const ShaderKey& k, uint64_t src_hash, GLuint p)
     fclose(f);
 }
 
-// Programs being built in the background, under render_set_async_shaders.
+// Programs being built in the background, under render_set_async_shaders: by the GL
+// itself (KHR_parallel_shader_compile, `prog` and `fs`) or by a compile worker (`job`).
 struct PendingProgram {
     GLuint prog, fs;
     std::string src;
     std::chrono::steady_clock::time_point t0;
+    std::shared_ptr<CompileJob> job;
 };
 static std::unordered_map<ShaderKey, PendingProgram, ShaderKeyHash> g_pending;
 static bool g_async_wanted;      // render_set_async_shaders
@@ -839,6 +967,30 @@ static const Program* get_program(const ShaderKey& k) {
     auto it = g_programs.find(k);
     if (it != g_programs.end()) return &it->second;
     const auto t0 = std::chrono::steady_clock::now();
+    // A compile worker's build: started now and nothing returned, its draws left out,
+    // until it has finished.
+    if (!g_parallel_compile && g_async_wanted && compile_workers_on()) {
+        auto pit = g_pending.find(k);
+        if (pit == g_pending.end()) {
+            PendingProgram pp{};
+            pp.src = gen_pixel_shader(k);
+            pp.job = compile_submit(pp.src);
+            pp.t0 = t0;
+            g_pending.emplace(k, std::move(pp));
+            g_stall.compiled++;
+            g_stall.compile_ms += ms_since(t0);
+            return nullptr;
+        }
+        PendingProgram& pp = pit->second;
+        if (!pp.job->done.load(std::memory_order_acquire)) return nullptr;
+        finish_program(pp.job->prog, pp.job->fs, pp.src);
+        const Program& pr = register_program(k, pp.job->prog);
+        if (frametime_on())
+            fprintf(stderr, "[shaders] built program %zu on a compile worker in %.1f ms\n", g_programs.size(), ms_since(pp.t0));
+        shader_cache_append(k, program_src_hash(pp.src.c_str()), pp.job->prog);
+        g_pending.erase(pit);
+        return &pr;
+    }
     if (!g_parallel_compile) {
         std::string src = gen_pixel_shader(k);
         GLuint p = build_program(k, src, nullptr, 0, 0);
@@ -1000,7 +1152,7 @@ void render_init(int internal_scale) {
     {
         GLint n = 0;
         glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &n);
-        g_binaries_supported = n > 0;
+        g_binaries_supported = n > 0 && glGetProgramBinary && glProgramBinary && glProgramParameteri;
     }
 #endif
     {
@@ -1015,11 +1167,14 @@ void render_init(int internal_scale) {
         }
         bool want = g_async_wanted;
         if (const char* v = getenv("GCN_ASYNC_SHADERS")) want = atoi(v) != 0;
+        g_async_wanted = want;
         g_parallel_compile = want && parallel;
         if (want)
             fprintf(stderr, parallel ? "[shaders] built in the background; a draw waiting for its program is left out\n"
-                                     : "[shaders] no parallel shader compilation: a new program stalls the frame it is built in\n");
+                    : g_compile_wanted > 0 ? "[shaders] built on compile workers; a draw waiting for its program is left out\n"
+                                           : "[shaders] no parallel shader compilation: a new program stalls the frame it is built in\n");
     }
+    if (!g_parallel_compile) compile_workers_start();
     shader_cache_load();
 
     glGenFramebuffers(1, &g_efb_fbo);

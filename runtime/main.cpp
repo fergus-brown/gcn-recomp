@@ -440,6 +440,35 @@ int main(int argc, char** argv) {
         plat_exit_now(rc);
     }
 #endif
+    // GL contexts for the renderer's compile workers (render_set_compile_workers), in the
+    // window's share group, each on a hidden window of its own so that no two threads ever
+    // have one window's device context current.
+    {
+        static std::vector<SDL_Window*> wins;
+        static std::vector<SDL_GLContext> ctxs;
+        const int n = std::clamp((int)std::thread::hardware_concurrency() / 2, 1, 4);
+        SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 1);
+        for (int i = 0; i < n; i++) {
+            SDL_Window* w = SDL_CreateWindow("", 0, 0, 1, 1, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+            SDL_GLContext c = w ? SDL_GL_CreateContext(w) : nullptr;
+            if (!c) {
+                if (w) SDL_DestroyWindow(w);
+                break;
+            }
+            wins.push_back(w);
+            ctxs.push_back(c);
+        }
+        SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, 0);
+        SDL_GL_MakeCurrent(win, ctx);
+        gx::render_set_compile_workers((int)ctxs.size(), [](int i) { return SDL_GL_MakeCurrent(wins[i], ctxs[i]) == 0; });
+    }
+    // Programs are built in the frame that needs them, not in the background: on NVIDIA's
+    // desktop driver a compile worker's build held up the render thread's own GL calls
+    // (a buffer upload waited 230 ms behind one), and a program took seconds to be ready
+    // while its draws were left out. Binaries (render_gl.cpp) make each program a one-off
+    // per machine, and the game's key list builds the known ones at the first start, on
+    // the compile workers. GCN_ASYNC_SHADERS=1 turns background builds on to try them.
+    gx::render_set_async_shaders(false);
     gx::render_init(scale);
     if (g_eye_mode) eye_init();
     if (first_person) gx::render_set_first_person(true);

@@ -44,6 +44,23 @@
 #include <OpenGL/gl3.h>
 #else
 #include <glad/gl.h>
+// Program binaries (GL 4.1, ARB_get_program_binary), which the 3.3 loader does not have:
+// resolved by gl_load_with, null where the context lacks them. Under the standard names
+// so that the renderer's binary cache (render_gl.cpp) reads the same on every GL.
+typedef void(GLAD_API_PTR* PFN_gcn_glGetProgramBinary)(GLuint, GLsizei, GLsizei*, GLenum*, void*);
+typedef void(GLAD_API_PTR* PFN_gcn_glProgramBinary)(GLuint, GLenum, const void*, GLsizei);
+typedef void(GLAD_API_PTR* PFN_gcn_glProgramParameteri)(GLuint, GLenum, GLint);
+extern PFN_gcn_glGetProgramBinary gcn_glGetProgramBinary;
+extern PFN_gcn_glProgramBinary gcn_glProgramBinary;
+extern PFN_gcn_glProgramParameteri gcn_glProgramParameteri;
+#define glGetProgramBinary gcn_glGetProgramBinary
+#define glProgramBinary gcn_glProgramBinary
+#define glProgramParameteri gcn_glProgramParameteri
+#ifndef GL_PROGRAM_BINARY_LENGTH
+#define GL_PROGRAM_BINARY_LENGTH 0x8741
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+#define GL_PROGRAM_BINARY_RETRIEVABLE_HINT 0x8257
+#endif
 #endif
 
 #endif
