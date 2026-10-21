@@ -975,5 +975,11 @@ its x taken in by `1 / g_wide` in one of two ways:
 - a draw rendered into a texture, meaning its next copy is to a texture, covers less than
   the picture and contains the draw's viewport. The copy must find it where the game put it.
 
+A partial copy to a texture whose last draw was narrowed (not one of the two kinds
+above) reads and clears its rectangle narrowed the same way. Otherwise it copies the
+wrong part of the EFB: a face drawn in a menu and copied into its bubble came out shifted
+towards the middle. That mapping suits 2D and a camera centred on the picture; a copy of
+one half of a split screen would need its own.
+
 The internal scale defaults to `auto`: the smallest multiple of 480 lines that covers the
 drawable. F11 toggles borderless fullscreen.

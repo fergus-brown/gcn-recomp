@@ -115,11 +115,15 @@ struct Accel {
     void finish() { pb.set32(PB_CUR_HI, cur); }
 };
 
+// A mixer volume is signed: the DSP multiplies signed, and MusyX pans a sound behind the
+// listener with small negative sends (Pro Logic's out-of-phase surround: -0x100 to AuxB R,
+// say). Read unsigned, -0x100 was a gain of nearly 2, and such a sound buzzed loudly in one
+// channel until its panning changed.
 void mix_add(int32_t* out, const int16_t* in, int n, PB& pb, int vol_idx, bool ramp) {
     uint16_t vol = pb.w[vol_idx];
     uint16_t delta = ramp ? pb.w[vol_idx + 1] : 0;
     for (int i = 0; i < n; i++) {
-        int32_t s = (int32_t)(((int64_t)in[i] * vol) >> 15);
+        int32_t s = (int32_t)(((int64_t)in[i] * (int16_t)vol) >> 15);
         out[i] += std::clamp(s, -32767, 32767);
         vol += delta;
     }

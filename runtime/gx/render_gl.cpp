@@ -120,7 +120,9 @@ static int g_scale = 2;
 static double g_wide = 1.0;                // the output's aspect over 4:3
 static float g_xk_vp = 1.0f;               // the draw being drawn's factors, set per draw
 static float g_xk_scr = 1.0f;
-static std::vector<uint8_t> g_wide_full;   // per command of the batch: 1 = drawn full width
+static std::vector<uint8_t> g_wide_full;   // per command of the batch: 1 = drawn full width,
+                                           // 2 = a copy of taken-in draws (classify_wide)
+static bool g_copy_narrow;                 // the copy being made is one of those
 static inline double efb_sx() { return g_scale * g_wide; }
 static inline int efb_pw() { return (int)std::lround(EFB_W * efb_sx()); }
 static inline int efb_px(double x) { return (int)std::lround(x * efb_sx()); }
@@ -2757,6 +2759,10 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         // Destination texel row 0 = top of the source rect.
         float rect[4] = {(float)c.src_x / EFB_W, (float)c.src_y / EFB_H,
                          (float)(c.src_x + c.src_w) / EFB_W, (float)(c.src_y + c.src_h) / EFB_H};
+        if (g_copy_narrow) {  // a copy of draws taken in about the centre (classify_wide)
+            rect[0] = 0.5f + (rect[0] - 0.5f) / (float)g_wide;
+            rect[2] = 0.5f + (rect[2] - 0.5f) / (float)g_wide;
+        }
         glUniform4fv(g_copy_u_rect, 1, rect);
         glUniform1i(g_copy_u_mode, (int)c.format | (c.depth ? 32 : 0));
         glBindVertexArray(g_copy_vao);
@@ -2807,8 +2813,10 @@ static void do_efb_copy(const EfbCopyCmd& c) {
     if (c.clear) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(efb_px(c.src_x), (EFB_H - c.src_y - c.src_h) * g_scale, efb_px(c.src_x + c.src_w) - efb_px(c.src_x),
-                  c.src_h * g_scale);
+        // A copy of taken-in draws clears where they were (g_copy_narrow).
+        const double cx = EFB_W * 0.5, k = g_copy_narrow ? 1.0 / g_wide : 1.0;
+        const int sx0 = efb_px(cx + (c.src_x - cx) * k), sx1 = efb_px(cx + (c.src_x + c.src_w - cx) * k);
+        glScissor(sx0, (EFB_H - c.src_y - c.src_h) * g_scale, sx1 - sx0, c.src_h * g_scale);
         GLbitfield bits = 0;
         glColorMask(c.clear_color, c.clear_color, c.clear_color, c.clear_alpha);
         if (c.clear_color || c.clear_alpha) bits |= GL_COLOR_BUFFER_BIT;
@@ -3016,6 +3024,12 @@ uint32_t present_count() { return g_present_count; }
 //    picture in its projection's clip space and cover most of it, in a viewport as wide
 //    as the EFB -- a background, a fade, a grab of the screen drawn back -- which is
 //    meant to fill the screen, and does.
+// And which copies are of draws that were taken in, g_wide_full[i] = 2: a copy to a texture
+// of less than the whole picture whose last draw was not drawn full width. Its rect is
+// taken in as they were, or it copies the wrong part of the EFB -- a face drawn in a menu
+// and copied into its bubble came out shifted towards the middle. (That is the mapping of
+// a 2D draw and of a camera centred on the picture; a split screen's half copied to a
+// texture would need its own.)
 static void classify_wide(const Batch& b) {
     g_wide_full.assign(b.cmds.size(), 0);
     if (g_wide == 1.0) return;
@@ -3061,6 +3075,13 @@ static void classify_wide(const Batch& b) {
             area += 0.5f * std::fabs((xb - xa) * (yc - ya) - (xc - xa) * (yb - ya));
         }
         if (bx0 <= -0.98f && bx1 >= 0.98f && by0 <= -0.98f && by1 >= 0.98f && area >= 3.0f) g_wide_full[i] = 1;
+    }
+    bool last_narrow = false;
+    for (size_t i = 0; i < b.cmds.size(); i++) {
+        const Cmd& c = b.cmds[i];
+        if (c.type == CmdType::Draw) last_narrow = !g_wide_full[i];
+        else if (c.type == CmdType::EfbCopy && !c.copy.to_xfb && c.copy.tex_id && c.copy.src_w < EFB_W - 8 && last_narrow)
+            g_wide_full[i] = 2;
     }
 }
 
@@ -4657,7 +4678,9 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             if (log_copies)
                 fprintf(stderr, "[copy] after draw %d: %ux%u from %u,%u to %08X tex %u fmt %X%s\n", draw_index - 1, c.copy.dst_w, c.copy.dst_h,
                         c.copy.src_x, c.copy.src_y, c.copy.dest, c.copy.tex_id, c.copy.format, c.copy.to_xfb ? " (display)" : "");
+            g_copy_narrow = g_wide_full[ci] == 2;
             do_efb_copy(c.copy);
+            g_copy_narrow = false;
             if (frametime_on()) ms_copy += ms_since(t_copy);
             glViewport(0, 0, efb_pw(), EFB_H * g_scale);
             cur_state = UINT32_MAX;
