@@ -125,10 +125,13 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
         return false;
     }
     char stamp[64] = "";
-    time_t now = time(nullptr);
+    // The RTC's start when something has already set it -- a replay being recorded again,
+    // or a session's host (netplay.h) -- so that this log replays with the same calendar.
+    time_t now = rtc_base() ? rtc_base() : time(nullptr);
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%S", localtime(&now));
     rtc_set_base(now);
-    fprintf(g_out, "# gcn-recomp input log v4\n# game %s  started %s\n# epoch %lld\n", GCN_DISC_ID, stamp, (long long)now);
+    fprintf(g_out, "# gcn-recomp input log v4\n# game %s  started %s\n# epoch %lld\n# utc offset %d\n", GCN_DISC_ID,
+            stamp, (long long)now, rtc_utc_offset());
     fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
     fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
     fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
@@ -178,8 +181,10 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
         if (line[0] == '#') {
             long long epoch;
             unsigned end_poll, end_frame;
+            int offset;
             if (sscanf(line, "# gcn-recomp input log v%d", &version) == 1) continue;
             if (sscanf(line, "# epoch %lld", &epoch) == 1) rtc_set_base((time_t)epoch);
+            if (sscanf(line, "# utc offset %d", &offset) == 1) rtc_set_utc_offset(offset);
             if (sscanf(line, "# end %u %u", &end_poll, &end_frame) == 2) end_key = version >= 2 ? end_poll : end_frame;
             continue;
         }

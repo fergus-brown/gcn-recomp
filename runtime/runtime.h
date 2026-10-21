@@ -89,6 +89,15 @@ void clock_pace();           // sleep if virtual time is ahead of real time (vir
 void irq_request();          // make the running guest thread poll at its next back-edge
 uint64_t host_ns();          // wall clock since start, for diagnostics
 void rtc_set_base(time_t utc);  // what the RTC reads at guest time zero (hw/exi.cpp)
+time_t rtc_base();              // 0 until set (the RTC's first read sets it to the wall clock)
+void rtc_set_utc_offset(int seconds);  // the time zone the RTC reads in (netplay: the host's)
+int rtc_utc_offset();           // that offset: the one set, else this machine's
+// Netplay's side of the clock (cpu.cpp; netplay.h). How far virtual time is behind the
+// wall clock, in back-edges, beyond what catch-up forgives (0 when it is not); and a
+// catch-up jump of that many edges made now and written to the input log, as clock_pace
+// makes its own.
+uint64_t clock_lag_edges();
+void clock_apply_jump(uint64_t edges);
 
 // Guest consistency checks (builds with GCN_GUEST_CHECKS). A game project may install a
 // function that inspects the guest's own data structures -- its heap, say -- and returns

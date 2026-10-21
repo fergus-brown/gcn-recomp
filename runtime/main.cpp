@@ -4,6 +4,7 @@
 #include "platform.h"
 #include "input_script.h"
 #include "input_log.h"
+#include "netplay.h"
 #include "input_map.h"
 #include "gx/render_gl.h"
 #include "gx/gl.h"
@@ -250,6 +251,10 @@ int main(int argc, char** argv) {
     const char* iso = iso_default.c_str();
     bool headless = false, hidden = false, input_log = true, first_person = false, fast = false, vr = false;
     std::string input_log_dir, replay_dir;
+    // --host=<port> [--players=N] [--net-delay=ticks] / --join=<host:port>: online play
+    // (netplay.h).
+    int net_host_port = 0, net_players = 2, net_delay = 6;
+    const char* net_join = nullptr;
     // --record=<file>[ --record-size=WxH]: a movie of the window with the game's audio (record.h).
     const char* record_to = nullptr;
     int record_w = 2560, record_h = 1440;
@@ -274,6 +279,10 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--no-input-log")) input_log = false;
         else if (!strncmp(argv[i], "--input-log=", 12)) input_log_dir = argv[i] + 12;
         else if (!strncmp(argv[i], "--replay=", 9)) replay_dir = argv[i] + 9;
+        else if (!strncmp(argv[i], "--host=", 7)) net_host_port = atoi(argv[i] + 7);
+        else if (!strncmp(argv[i], "--players=", 10)) net_players = atoi(argv[i] + 10);
+        else if (!strncmp(argv[i], "--net-delay=", 12)) net_delay = atoi(argv[i] + 12);
+        else if (!strncmp(argv[i], "--join=", 7)) net_join = argv[i] + 7;
         else if (!strcmp(argv[i], "--sample")) debug_sampler_start();
         else if (!strcmp(argv[i], "--no-music")) { void audio_mute_music(bool); audio_mute_music(true); }
         else if (!strncmp(argv[i], "--record=", 9)) record_to = argv[i] + 9;
@@ -319,6 +328,20 @@ int main(int argc, char** argv) {
     if (!replay_dir.empty()) {
         if (!input_replay_load(replay_dir, replay_card)) return 1;
         if (!replay_card.empty()) g_memcard_path = replay_card.c_str();
+    }
+    // A session: every peer plays on the host's card and clock. A client keeps the host's
+    // card in a scratch file, as a replay does, so its own card is untouched.
+    if (net_host_port || net_join) {
+        if (!replay_dir.empty()) { fprintf(stderr, "--replay and online play do not go together\n"); return 1; }
+        plat_make_dirs("saves");
+        if (net_join) {
+            replay_card = "saves/memcard_session.raw";
+            if (!netplay_join(net_join, replay_card)) return 1;
+            g_memcard_path = replay_card.c_str();
+        } else if (!netplay_host(net_host_port, net_players, net_delay,
+                                 g_memcard_path ? g_memcard_path : "saves/memcard_a.raw")) {
+            return 1;
+        }
     }
     if (input_log) {
         if (input_log_dir.empty()) {

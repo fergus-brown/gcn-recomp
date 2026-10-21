@@ -1,6 +1,7 @@
 // Serial Interface: GameCube controllers.
 #include "../runtime.h"
 #include "../input_log.h"
+#include "../netplay.h"
 #include "pad.h"
 #include <mutex>
 
@@ -12,13 +13,15 @@ void pad_set_state(int chan, const PadState& s) {
     g_pads[chan] = s;
 }
 static PadState pad_get(int chan) {
-    // Replay substitutes the logged state for the live one; recording sees what the
-    // guest actually read, whichever that was.
+    // Replay substitutes the logged state for the live one, and a session the state its
+    // players sent for this tick (netplay.h); recording sees what the guest actually read,
+    // whichever that was.
     PadState p;
     {
         std::lock_guard<std::mutex> lk(g_pad_mutex);
         p = g_pads[chan];
     }
+    netplay_pad(chan, p);
     input_pad_poll(chan, p);
     return p;
 }
@@ -103,6 +106,15 @@ static void si_transfer_complete() {
 
 // Called every VI field: latch polled controller data.
 void si_poll_tick() {
+    // A session's lockstep: this tick's pads are every player's, once they have arrived.
+    if (netplay_active()) {
+        PadState live;
+        {
+            std::lock_guard<std::mutex> lk(g_pad_mutex);
+            live = g_pads[0];
+        }
+        netplay_tick(live);
+    }
     uint32_t en = (g_poll >> 4) & 0xF;
     for (int chan = 0; chan < 4; chan++) {
         if (!(en & (0x8 >> chan))) continue;

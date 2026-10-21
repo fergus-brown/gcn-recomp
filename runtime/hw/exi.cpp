@@ -40,12 +40,19 @@ static void sram_init() {
 // on a replay, the wall clock otherwise), so a replay sees the recording's calendar.
 static time_t g_rtc_base;
 void rtc_set_base(time_t utc) { g_rtc_base = utc; }
+time_t rtc_base() { return g_rtc_base; }
+// The local time zone's offset, which a session's peers take from its host so that every
+// one of them reads the same calendar (netplay.h); otherwise this machine's.
+static bool g_rtc_have_offset;
+static int g_rtc_offset;
+void rtc_set_utc_offset(int seconds) { g_rtc_offset = seconds; g_rtc_have_offset = true; }
+int rtc_utc_offset() { return g_rtc_have_offset ? g_rtc_offset : plat_utc_offset_seconds(); }
 
 static uint32_t rtc_now() {
     // seconds since 2000-01-01 00:00:00 local time
     if (!g_rtc_base) g_rtc_base = time(nullptr);
     time_t t = g_rtc_base + (time_t)(now_ticks() / TB_FREQ);
-    time_t local = t + plat_utc_offset_seconds();
+    time_t local = t + rtc_utc_offset();
     return (uint32_t)(local - 946684800);
 }
 

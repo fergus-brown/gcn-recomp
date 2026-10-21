@@ -4,6 +4,7 @@
 #include "mmu.h"
 #include "modules.h"
 #include "input_log.h"
+#include "netplay.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -539,12 +540,29 @@ void clock_pace() {
         std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
     } else if (ahead < -kForgiveNs) {
         g_pace_offset_ns += ahead;  // too far behind: re-anchor
-    } else if (ahead < -kCatchupNs && g_catchup && !input_replay_active()) {
+    } else if (ahead < -kCatchupNs && g_catchup && !input_replay_active() && !netplay_active()) {
         const double ticks = (double)-ahead * (TB_FREQ / 1e9) * g_time_scale;
         const uint64_t edges = (uint64_t)((ticks + g_ticks_per_edge - 1) / g_ticks_per_edge);
         input_log_jump(g_vcount, edges);
         clock_jump(edges);
     }
+}
+
+// In a session the host's own lag decides every peer's jumps (netplay.h): it is measured
+// here as clock_pace would, and the jump is made by netplay at the tick it was sent for.
+uint64_t clock_lag_edges() {
+    if (!g_virtual_clock || g_time_scale <= 0 || !g_catchup) return 0;
+    int64_t virt_ns = (int64_t)((double)now_ticks() * (1e9 / TB_FREQ) / g_time_scale);
+    int64_t ahead = virt_ns - (int64_t)host_ns() - g_pace_offset_ns;
+    if (ahead >= -kCatchupNs || ahead < -kForgiveNs) return 0;
+    const double ticks = (double)-ahead * (TB_FREQ / 1e9) * g_time_scale;
+    return (uint64_t)((ticks + g_ticks_per_edge - 1) / g_ticks_per_edge);
+}
+
+void clock_apply_jump(uint64_t edges) {
+    if (!edges) return;
+    input_log_jump(g_vcount, edges);
+    clock_jump(edges);
 }
 
 struct Event {
