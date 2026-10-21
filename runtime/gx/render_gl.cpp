@@ -78,12 +78,13 @@ struct UniformShadow {
     uint32_t screen_uv;
     float ripple[2];
     float tsz[16];
+    float tcsz[16];
     uint32_t texsnap;
 };
 
 struct Program {
     GLuint prog;
-    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_indmtx, u_indscale,
+    GLint u_proj, u_vp_a, u_vp_b, u_point_size, u_tex, u_reg, u_kstage, u_texsize, u_tcsize, u_indmtx, u_indscale,
         u_alpharef, u_fog, u_fogmode, u_fogcolor, u_indcoordscale, u_texsnap, u_zbias, u_zplane, u_dstalpha;
     GLint u_vr, u_view, u_crop, u_zproj, u_screen_uv, u_screen_px, u_screen_ripple, u_uvgrad;
     GLint u_points, u_point_off;
@@ -560,6 +561,7 @@ static const Program& register_program(const ShaderKey& k, GLuint p) {
     pr.u_reg = glGetUniformLocation(p, "u_reg");
     pr.u_kstage = glGetUniformLocation(p, "u_kstage");
     pr.u_texsize = glGetUniformLocation(p, "u_texsize");
+    pr.u_tcsize = glGetUniformLocation(p, "u_tcsize");
     pr.u_indmtx = glGetUniformLocation(p, "u_indmtx");
     pr.u_indscale = glGetUniformLocation(p, "u_indscale");
     pr.u_alpharef = glGetUniformLocation(p, "u_alpharef");
@@ -2259,6 +2261,18 @@ static void apply_state(const PixelState& st, int prim) {
         g_astat.tsz++;
         glUniform2fv(pr.u_texsize, 8, tsz);
         memcpy(u.tsz, tsz, sizeof(tsz));
+    }
+    // Each coordinate's scale into texels, SU_SSIZE/SU_TSIZE (size - 1 in the low 16 bits);
+    // 0 for one never set, which the shader takes as the texture's size (tc_size).
+    float tcsz[16];
+    for (int t = 0; t < 8; t++) {
+        const uint32_t ss = bp[0x30 + 2 * t] & 0xFFFF, ts = bp[0x31 + 2 * t] & 0xFFFF;
+        tcsz[t * 2] = ss ? (float)(ss + 1) : 0.0f;
+        tcsz[t * 2 + 1] = ss ? (float)(ts + 1) : 0.0f;
+    }
+    if (!(held && memcmp(tcsz, u.tcsz, sizeof(tcsz)) == 0)) {
+        glUniform2fv(pr.u_tcsize, 8, tcsz);
+        memcpy(u.tcsz, tcsz, sizeof(tcsz));
     }
     if (!(held && u.texsnap == texsnap)) {
         glUniform1i(pr.u_texsnap, (GLint)texsnap);

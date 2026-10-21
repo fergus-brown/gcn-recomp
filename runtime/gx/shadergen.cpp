@@ -434,6 +434,14 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     s += "uniform ivec4 u_reg[4];\n";
     s += "uniform ivec4 u_kstage[16];\n";  // the konstant each stage selects (kcsel, kasel)
     s += "uniform vec2 u_texsize[8];\n";
+    // What a texture coordinate is scaled by into texels: its SU_SSIZE/SU_TSIZE (bp[0x30 +
+    // 2n]), per coordinate. The SDK sets those to the size of the texture the coordinate is
+    // looked up in, unless the game sets them itself (GXSetTexCoordScaleManually) -- a
+    // tilemap drawn through an indirect stage scales its coordinate to the whole map's
+    // texels, which neither texture's size is. 0 where the game never set them: the map's
+    // size, as before.
+    s += "uniform vec2 u_tcsize[8];\n";
+    s += "#define tc_size(c, m) (u_tcsize[c].x > 0.0 ? u_tcsize[c] : u_texsize[m])\n";
     s += "uniform ivec3 u_indmtx[6];\n";  // 3 matrices x 2 rows (11-bit signed entries)
     s += "uniform int u_indscale[3];\n";
     s += "uniform ivec2 u_alpharef;\n";
@@ -502,8 +510,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
     // indirect stages
     for (uint32_t i = 0; i < nind; i++) {
         uint32_t map = (k.iref >> (6 * i)) & 7, coord = (k.iref >> (6 * i + 3)) & 7;
-        W("  ivec4 indtex%u = sample_tex(%u, snap_tex(%u, uv%u * u_indscalef(%u) * u_texsize[%u]) / u_texsize[%u]);\n", i, map,
-          map, coord, i, map, map);
+        W("  ivec4 indtex%u = sample_tex(%u, snap_tex(%u, uv%u * u_indscalef(%u) * tc_size(%u, %u)) / u_texsize[%u]);\n", i,
+          map, map, coord, i, coord, map, map);
     }
 
     for (uint32_t st = 0; st < nstages; st++) {
@@ -521,7 +529,8 @@ std::string gen_pixel_shader(const ShaderKey& k) {
         const bool subst = (k.efb_tex_mask >> map) & 1;
         const uint32_t cbit = 1u << coord;
         // ---- indirect texture offset ----
-        W("    vec2 tc = %s%u * u_texsize[%u];\n", subst ? "suv" : "uv", coord, map);
+        if (subst) W("    vec2 tc = suv%u * u_texsize[%u];\n", coord, map);
+        else W("    vec2 tc = uv%u * tc_size(%u, %u);\n", coord, coord, map);
         uint32_t bt = ind & 3, fmt = (ind >> 2) & 3, bias = (ind >> 4) & 7, bs = (ind >> 7) & 3, mid = (ind >> 9) & 15;
         uint32_t sw = (ind >> 13) & 7, tw = (ind >> 16) & 7;
         bool fb = (ind >> 20) & 1;
