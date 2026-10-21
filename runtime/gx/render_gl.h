@@ -57,6 +57,13 @@ bool render_shader_cache_compiling();
 // it discards the EFB's contents and every texture an EFB copy has produced.
 void render_set_internal_scale(int scale);
 
+// The output's aspect: 4:3 (1.333, the game's own), 16:9 or 21:9 (up to three times as
+// wide as 4:3). The EFB is widened to it and the picture presented at it; a 3D scene opens
+// out at the sides and 2D keeps its size in the middle, apart from layers over the whole
+// picture, which fill it (classify_wide in render_gl.cpp). Between frames, as the scale.
+void render_set_aspect(double aspect);
+double render_aspect();
+
 void render_set_window_size(int w, int h);
 
 // Redirect the finished frame somewhere other than the window framebuffer, e.g. a VR

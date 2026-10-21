@@ -951,3 +951,29 @@ line of a buffer filled to the brim -- which a display list sized by a dry run i
 pointer came back to the base with its wrap bit set, `GXEndDisplayList` took that for an
 overflow and returned a size of zero, and every call of the list drew nothing.
 `cp_end_excl` in `gx/fifo.cpp` is the exclusive end the arithmetic uses.
+
+## Widescreen
+
+`render_set_aspect` (frontend: `--aspect=4:3|16:9|21:9`, F9 in play, `saves/settings.txt`)
+widens the EFB to the output's aspect while every draw keeps the game's 640-wide logical
+coordinates. The picture is presented at the wider aspect with no bars, and each draw has
+its x taken in by `1 / g_wide` in one of two ways:
+
+- **Cameras** (a perspective projection in a viewport at least ~45% of the width) are taken
+  in about their own viewport's centre. The projection is unchanged, so the picture keeps
+  its proportions and the sides open out, while the game's culling and its 3D-to-2D
+  placement still assume 4:3. Objects culled by the game at the old edges can therefore pop
+  in the new margins; fixing that is a game hook (its cull test), not a renderer change.
+  Each half of a split screen widens within its own half.
+- **2D**, and 3D in a small viewport (a portrait inside a menu bubble), is taken in about
+  the centre of the picture, scissor included, so it keeps its size and stays in the middle.
+
+`classify_wide` leaves two kinds of draw at full width:
+
+- an orthographic layer that spans the whole picture (a background, a fade, a screen grab
+  drawn back);
+- a draw rendered into a texture, meaning its next copy is to a texture, covers less than
+  the picture and contains the draw's viewport. The copy must find it where the game put it.
+
+The internal scale defaults to `auto`: the smallest multiple of 480 lines that covers the
+drawable. F11 toggles borderless fullscreen.

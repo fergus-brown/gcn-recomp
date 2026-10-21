@@ -220,6 +220,66 @@ static void update_pad() {
     pad_set_state(0, p);
 }
 
+// ---------------------------------------------------------------------------
+// Display settings: the picture's aspect, the internal resolution and fullscreen, kept in
+// saves/settings.txt (aspect=4:3|16:9|21:9, resolution=auto|<scale>, fullscreen=0|1) and
+// changed in play with F9 (the next aspect) and F11 (fullscreen). The command line's
+// --aspect, --scale and --fullscreen override the file for a run.
+// ---------------------------------------------------------------------------
+struct DisplaySettings {
+    std::string aspect = "4:3";
+    int scale = 0;  // 0: as many times the game's 480 lines as the window needs
+    bool fullscreen = false;
+};
+static DisplaySettings g_display;
+static const char* kSettingsPath = "saves/settings.txt";
+static SDL_Window* g_window;
+
+static double aspect_value(const std::string& a) {
+    if (a == "16:9") return 16.0 / 9.0;
+    if (a == "21:9") return 21.0 / 9.0;
+    return 4.0 / 3.0;
+}
+
+static void settings_load() {
+    FILE* f = fopen(kSettingsPath, "rb");
+    if (!f) return;
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        char key[32], val[64];
+        if (sscanf(line, " %31[^=]=%63s", key, val) != 2) continue;
+        if (!strcmp(key, "aspect") && (!strcmp(val, "4:3") || !strcmp(val, "16:9") || !strcmp(val, "21:9")))
+            g_display.aspect = val;
+        else if (!strcmp(key, "resolution")) g_display.scale = !strcmp(val, "auto") ? 0 : atoi(val);
+        else if (!strcmp(key, "fullscreen")) g_display.fullscreen = atoi(val) != 0;
+    }
+    fclose(f);
+}
+
+static void settings_save() {
+    plat_make_dirs("saves");
+    FILE* f = fopen(kSettingsPath, "wb");
+    if (!f) return;
+    fprintf(f, "aspect=%s\n", g_display.aspect.c_str());
+    if (g_display.scale > 0) fprintf(f, "resolution=%d\n", g_display.scale);
+    else fprintf(f, "resolution=auto\n");
+    fprintf(f, "fullscreen=%d\n", g_display.fullscreen ? 1 : 0);
+    fclose(f);
+}
+
+static void display_apply_fullscreen() {
+    if (g_window) SDL_SetWindowFullscreen(g_window, g_display.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
+// The internal scale for a drawable this tall: the setting, or with "auto" the smallest
+// multiple of the game's 480 lines that covers it (a 2160-line screen renders 2400 and
+// takes it down), so the picture is drawn at the screen's own resolution or finer.
+static int display_scale_for(int drawable_h) {
+    if (g_display.scale > 0) return std::min(g_display.scale, gx::kMaxInternalScale);
+    const int s = (drawable_h + 479) / 480;
+    return std::clamp(s, 1, gx::kMaxInternalScale);
+}
+
 // The window's events. False once the user has asked to quit.
 static bool pump_events() {
     SDL_Event e;
@@ -231,6 +291,17 @@ static bool pump_events() {
         else if (e.type == SDL_CONTROLLERDEVICEADDED && !g_ctrl && !input_map_binds_index(e.cdevice.which))
             g_ctrl = SDL_GameControllerOpen(e.cdevice.which);
         else if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_ESCAPE) running = false;
+        else if (e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F9) {
+            const std::string& a = g_display.aspect;
+            g_display.aspect = a == "4:3" ? "16:9" : a == "16:9" ? "21:9" : "4:3";
+            gx::render_set_aspect(aspect_value(g_display.aspect));
+            settings_save();
+            fprintf(stderr, "[display] aspect %s\n", g_display.aspect.c_str());
+        } else if (e.type == SDL_KEYDOWN && !e.key.repeat && e.key.keysym.scancode == SDL_SCANCODE_F11) {
+            g_display.fullscreen = !g_display.fullscreen;
+            display_apply_fullscreen();
+            settings_save();
+        }
     }
     return running;
 }
@@ -274,7 +345,9 @@ int main(int argc, char** argv) {
     bool test_ffb = false;
     // --telemetry[=host:port]: the game's motion to a motion platform (telemetry.h).
     const char* telemetry_to = getenv("GCN_TELEMETRY");
-    int scale = 2;
+    int scale = -1;  // --scale: the internal scale for this run, else the settings' (0 = auto)
+    const char* aspect_arg = nullptr;
+    bool fullscreen_arg = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--log-all")) for (auto& e : g_log_enabled) e = true;
         else if (!strncmp(argv[i], "--log=", 6)) {
@@ -304,7 +377,9 @@ int main(int argc, char** argv) {
         else if (!strcmp(argv[i], "--hidden")) hidden = true;
         else if (!strcmp(argv[i], "--fast")) fast = true;
         else if (!strcmp(argv[i], "--cull-swap")) gx::g_cull_swap = true;
-        else if (!strncmp(argv[i], "--scale=", 8)) scale = atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--scale=", 8)) scale = !strcmp(argv[i] + 8, "auto") ? 0 : atoi(argv[i] + 8);
+        else if (!strncmp(argv[i], "--aspect=", 9)) aspect_arg = argv[i] + 9;
+        else if (!strcmp(argv[i], "--fullscreen")) fullscreen_arg = true;
         else if (!strncmp(argv[i], "--dump-dir=", 11)) gx::g_dump_dir = argv[i] + 11;
         else if (!strncmp(argv[i], "--dump-every=", 13)) gx::g_dump_every = atoi(argv[i] + 13);
         else if (argv[i][0] != '-') iso = argv[i];
@@ -485,7 +560,19 @@ int main(int argc, char** argv) {
     // per machine, and the game's key list builds the known ones at the first start, on
     // the compile workers. GCN_ASYNC_SHADERS=1 turns background builds on to try them.
     gx::render_set_async_shaders(false);
-    gx::render_init(scale);
+    // The display settings, then this run's overrides (DisplaySettings).
+    settings_load();
+    if (scale >= 0) g_display.scale = scale;
+    if (aspect_arg) g_display.aspect = aspect_arg;
+    if (fullscreen_arg) g_display.fullscreen = true;
+    g_window = win;
+    display_apply_fullscreen();
+    gx::render_set_aspect(aspect_value(g_display.aspect));
+    {
+        int dw0, dh0;
+        SDL_GL_GetDrawableSize(win, &dw0, &dh0);
+        gx::render_init(display_scale_for(dh0));
+    }
     if (g_eye_mode) eye_init();
     if (first_person) gx::render_set_first_person(true);
     if (gx::g_dump_dir) plat_make_dirs(gx::g_dump_dir);
@@ -505,6 +592,8 @@ int main(int argc, char** argv) {
         int dw, dh;
         SDL_GL_GetDrawableSize(win, &dw, &dh);
         gx::render_set_window_size(dw, dh);
+        // The internal scale follows the window (display_scale_for); changed between frames.
+        gx::render_set_internal_scale(display_scale_for(dh));
         auto b = gx::take_batch(4);
         if (!b) continue;
         // GCN_STEREOLOG=1: what the game's stereo hook (vr_game.h) would have a headset

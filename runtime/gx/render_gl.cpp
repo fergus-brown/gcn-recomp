@@ -73,6 +73,7 @@ struct UniformShadow {
     float hud_push;
     float viewport[6];
     uint32_t scissor_off;      // bp[0x59]
+    float xk_vp, xk_scr;       // g_xk_vp and g_xk_scr the viewport was sent with
     uint32_t psize_reg;        // bp[0x22]
     uint32_t point_tex;        // point_tex_key(): what u_points and u_point_off were sent for
     uint32_t tev_reg[4][2], tev_konst[4][2];
@@ -99,6 +100,30 @@ struct Program {
 
 // Samples kept per hardware pixel, in each axis. See render_set_internal_scale.
 static int g_scale = 2;
+
+// ---- Widescreen (render_set_aspect) ----
+// The EFB is kept in the game's own coordinates, 640 wide, and allocated g_wide times as
+// wide again: every horizontal pixel position (viewport, scissor, copy rect) is multiplied
+// by g_scale * g_wide rather than g_scale, so whatever the game draws, and copies, and
+// samples by normalised coordinates, is the same picture stretched. Each draw then has
+// its x taken in by 1 / g_wide, in one of two ways:
+//  - a 3D draw (a perspective projection) about its own viewport's centre, g_xk_vp: the
+//    picture is back to its own proportions and the sides open out -- the projection is
+//    untouched, so what the game culls and where it puts 2D over 3D still assume 4:3 --
+//    and a split screen's halves each widen within their own half. Its scissor is the
+//    game's, stretched with everything else.
+//  - a 2D draw about the centre of the picture, g_xk_scr, scissor and all: it keeps its
+//    size and stays in the middle.
+// A draw that is to fill the width is left as it is: a layer covering the whole picture
+// (a background, a fade, a grab of the screen drawn back), and one whose result goes into
+// a texture, whose copy has to find it where the game put it. See classify_wide().
+static double g_wide = 1.0;                // the output's aspect over 4:3
+static float g_xk_vp = 1.0f;               // the draw being drawn's factors, set per draw
+static float g_xk_scr = 1.0f;
+static std::vector<uint8_t> g_wide_full;   // per command of the batch: 1 = drawn full width
+static inline double efb_sx() { return g_scale * g_wide; }
+static inline int efb_pw() { return (int)std::lround(EFB_W * efb_sx()); }
+static inline int efb_px(double x) { return (int)std::lround(x * efb_sx()); }
 
 // VR eye state. When active, perspective batches are re-projected for the eye and the
 // orthographic ones (the 2D HUD) are painted on a frame standing out in front of the
@@ -1180,14 +1205,14 @@ void render_init(int internal_scale) {
     glGenFramebuffers(1, &g_efb_fbo);
     glGenTextures(1, &g_efb_color);
     glBindTexture(GL_TEXTURE_2D, g_efb_color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, efb_pw(), EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &g_efb_depth);
     glBindTexture(GL_TEXTURE_2D, g_efb_depth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, EFB_W * g_scale, EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, efb_pw(), EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
@@ -1293,12 +1318,32 @@ void render_set_window_size(int w, int h) { g_win_w = w; g_win_h = h; }
 // reused at the old resolution and quietly sample wrong. They go with the EFB.
 static void gl_state_invalidate();
 static void uniforms_invalidate();
+static void efb_resize(int ow, int oh);
+static void xfbs_drop();
 void render_set_internal_scale(int scale) {
     if (scale < 1) scale = 1;
     if (scale > kMaxInternalScale) scale = kMaxInternalScale;
     if (scale == g_scale) return;
-    const int old_scale = g_scale;
+    const int ow = efb_pw(), oh = EFB_H * g_scale;
     g_scale = scale;
+    efb_resize(ow, oh);
+}
+
+// The output's aspect (4:3 = 1.333, 16:9, 21:9): the EFB is made as much wider, and the
+// picture presented at it. See g_wide.
+void render_set_aspect(double aspect) {
+    double w = aspect > 0.0 ? aspect / (4.0 / 3.0) : 1.0;
+    if (w < 1.0) w = 1.0;
+    if (w > 3.0) w = 3.0;
+    if (std::fabs(w - g_wide) < 1e-6) return;
+    const int ow = efb_pw(), oh = EFB_H * g_scale;
+    g_wide = w;
+    if (g_efb_color) efb_resize(ow, oh);
+}
+double render_aspect() { return 4.0 / 3.0 * g_wide; }
+
+static void efb_resize(int ow, int oh) {
+    xfbs_drop();
     gl_state_invalidate();
     uniforms_invalidate();
     // The EFB keeps what it held, scaled. A frame on the console does not begin with a
@@ -1312,14 +1357,14 @@ void render_set_internal_scale(int scale) {
     glActiveTexture(GL_TEXTURE0);
     glGenTextures(1, &color);
     glBindTexture(GL_TEXTURE_2D, color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EFB_W * g_scale, EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, efb_pw(), EFB_H * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenTextures(1, &depth);
     glBindTexture(GL_TEXTURE_2D, depth);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, EFB_W * g_scale, EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, efb_pw(), EFB_H * g_scale, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     GLuint fbo = 0;
@@ -1333,7 +1378,7 @@ void render_set_internal_scale(int scale) {
     glDisable(GL_SCISSOR_TEST);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glDepthMask(GL_TRUE);
-    const GLint ow = EFB_W * old_scale, oh = EFB_H * old_scale, nw = EFB_W * g_scale, nh = EFB_H * g_scale;
+    const GLint nw = efb_pw(), nh = EFB_H * g_scale;
     glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     glBlitFramebuffer(0, 0, ow, oh, 0, 0, nw, nh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
@@ -1681,6 +1726,7 @@ struct AppliedState {
     uint32_t pal_id[8];       // unit 8+m: the palette map m's EFB copy is read through
     int prim;
     bool hud_depth;
+    float xk_scr = 1.0f;      // g_xk_scr the scissor was set with
 };
 static AppliedState g_applied;
 // What GL's face culling is set to: -1 unknown, 0 off, 1 front, 2 back, 3 both. Kept apart
@@ -1743,7 +1789,8 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
     const bool perspective = (int)p[6] == 0;
     int xoff, yoff;
     scissor_offset(st.bp, xoff, yoff);
-    const float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
+    const float vpa[4] = {(2.0f * (vp[3] - xoff) / EFB_W - 1.0f) * g_xk_scr, 2.0f * vp[0] / EFB_W * g_xk_vp * g_xk_scr,
+                          2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
     const float vpb[2] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f};
     double X[3], Y[3], Z[3];
     for (int i = 0; i < 3; i++) {
@@ -1754,7 +1801,7 @@ static bool zfreeze_plane(const Batch& b, const Cmd& c, float out[4]) {
         cz = p[4] * v[2] + p[5];
         if (cw <= 0.0f) return false;
         const float px = vpa[0] * cw + vpa[1] * cx, py = vpa[2] * cw + vpa[3] * cy, pz = vpb[0] * cw + vpb[1] * cz;
-        X[i] = (px / cw + 1.0) * 0.5 * EFB_W * g_scale;
+        X[i] = (px / cw + 1.0) * 0.5 * efb_pw();
         Y[i] = (-py / cw + 1.0) * 0.5 * EFB_H * g_scale;
         Z[i] = (pz / cw + 1.0) * 0.5;
     }
@@ -2155,14 +2202,20 @@ static void apply_state(const PixelState& st, int prim) {
     // Per state, whatever the projection: see g_frame_grad.
     if (frame_screen && g_cur_uvgrad && pr.u_uvgrad >= 0) glUniform4fv(pr.u_uvgrad, 8, g_cur_uvgrad);
     const float* vp = st.viewport;  // sx, sy, sz, ox, oy, oz
-    if (!(held && bp[0x59] == u.scissor_off && memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
+    if (!(held && bp[0x59] == u.scissor_off && g_xk_vp == u.xk_vp && g_xk_scr == u.xk_scr &&
+          memcmp(vp, u.viewport, sizeof(st.viewport)) == 0)) {
         g_astat.viewport++;
-        float vpa[4] = {2.0f * (vp[3] - xoff) / EFB_W - 1.0f, 2.0f * vp[0] / EFB_W, 2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
+        // This draw's widescreen factors: about the viewport's centre, and about the
+        // picture's (g_xk_vp, g_xk_scr).
+        float vpa[4] = {(2.0f * (vp[3] - xoff) / EFB_W - 1.0f) * g_xk_scr, 2.0f * vp[0] / EFB_W * g_xk_vp * g_xk_scr,
+                        2.0f * (vp[4] - yoff) / EFB_H - 1.0f, 2.0f * vp[1] / EFB_H};
         float vpb[4] = {2.0f * vp[5] / 16777215.0f - 1.0f, 2.0f * vp[2] / 16777215.0f, 0, 0};
         glUniform4fv(pr.u_vp_a, 1, vpa);
         glUniform4fv(pr.u_vp_b, 1, vpb);
         memcpy(u.viewport, vp, sizeof(st.viewport));
         u.scissor_off = bp[0x59];
+        u.xk_vp = g_xk_vp;
+        u.xk_scr = g_xk_scr;
     }
     // Only points read the point size, and a game that sets a line width per draw changes
     // this register with every line: so it is sent when a draw of points needs it, and a
@@ -2529,7 +2582,8 @@ static void apply_state(const PixelState& st, int prim) {
     }
     g_applied.prim = prim;
     // Scissor (EFB coords, y down), measured from the same origin as the viewport.
-    const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59];
+    const bool same_scissor = g_applied.valid && bp[0x20] == abp[0x20] && bp[0x21] == abp[0x21] && bp[0x59] == abp[0x59] &&
+                              g_xk_scr == g_applied.xk_scr;
     if (!same_scissor) {
         g_astat.scissor++;
         int x0 = (int)(bp[0x20] >> 12 & 0x7FF) - xoff, y0 = (int)(bp[0x20] & 0x7FF) - yoff;
@@ -2557,11 +2611,14 @@ static void apply_state(const PixelState& st, int prim) {
             glDisable(GL_SCISSOR_TEST);
         } else {
             glEnable(GL_SCISSOR_TEST);
-            glScissor(x0 * g_scale, (EFB_H - y1) * g_scale, (x1 - x0) * g_scale, (y1 - y0) * g_scale);
+            // A 2D draw's is taken about the picture's centre with it (g_xk_scr).
+            const double c = EFB_W * 0.5, sx0 = c + (x0 - c) * g_xk_scr, sx1 = c + (x1 - c) * g_xk_scr;
+            glScissor(efb_px(sx0), (EFB_H - y1) * g_scale, efb_px(sx1) - efb_px(sx0), (y1 - y0) * g_scale);
         }
     }
     // Everything above has now been compared against bp, so it becomes the reference.
     memcpy(g_applied.bp, bp, sizeof(g_applied.bp));
+    g_applied.xk_scr = g_xk_scr;
     g_applied.valid = true;
 }
 
@@ -2606,13 +2663,15 @@ static void copy_writeback(const EfbCopyCmd& c) {
         copy_writeback_done(c.writeback_ticket, {});
         return;
     }
-    std::vector<uint8_t> px((size_t)w * s * h * s * 4);
+    const uint32_t pw = (uint32_t)efb_px(w);  // the copy's texture is that wide (g_wide)
+    std::vector<uint8_t> px((size_t)pw * h * s * 4);
     glPixelStorei(GL_PACK_ALIGNMENT, 4);
-    glReadPixels(0, 0, (GLsizei)(w * s), (GLsizei)(h * s), GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glReadPixels(0, 0, (GLsizei)pw, (GLsizei)(h * s), GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     auto at = [&](uint32_t x, uint32_t y) {
         x = std::min(x, w - 1);
         y = std::min(y, h - 1);
-        return &px[(((size_t)y * s + s / 2) * w * s + (size_t)x * s + s / 2) * 4];
+        const size_t tx = std::min<size_t>((size_t)((x + 0.5) * pw / w), pw - 1);
+        return &px[(((size_t)y * s + s / 2) * pw + tx) * 4];
     };
     std::vector<uint8_t> encoded(bytes);
     uint8_t* out = encoded.data();
@@ -2667,7 +2726,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
             glGenTextures(1, &t.tex);
             t.w = c.dst_w; t.h = c.dst_h; t.levels = 1; t.efb = true;
             glBindTexture(GL_TEXTURE_2D, t.tex);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c.dst_w * g_scale, c.dst_h * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, efb_px(c.dst_w), c.dst_h * g_scale, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
         }
         t.last_used = g_render_frame;
@@ -2676,7 +2735,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
         t.depth = c.depth;
         glBindFramebuffer(GL_FRAMEBUFFER, g_copy_fbo);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
-        glViewport(0, 0, c.dst_w * g_scale, c.dst_h * g_scale);
+        glViewport(0, 0, efb_px(c.dst_w), c.dst_h * g_scale);
         glUseProgram(g_copy_prog);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, g_efb_color);
@@ -2711,7 +2770,7 @@ static void do_efb_copy(const EfbCopyCmd& c) {
             (void)size_parsed;
             const bool by_size = size_w && c.dst_w == size_w && c.dst_h == size_h;
             if (copydump && (by_size || (copydump_frame && g_present_count + 1 == copydump_frame))) {
-                const int w = c.dst_w * g_scale, h = c.dst_h * g_scale;
+                const int w = efb_px(c.dst_w), h = c.dst_h * g_scale;
                 std::vector<uint8_t> px((size_t)w * h * 4), out((size_t)w * h * 4);
                 glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
                 char path[512];
@@ -2739,7 +2798,8 @@ static void do_efb_copy(const EfbCopyCmd& c) {
     if (c.clear) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
         glEnable(GL_SCISSOR_TEST);
-        glScissor(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, c.src_w * g_scale, c.src_h * g_scale);
+        glScissor(efb_px(c.src_x), (EFB_H - c.src_y - c.src_h) * g_scale, efb_px(c.src_x + c.src_w) - efb_px(c.src_x),
+                  c.src_h * g_scale);
         GLbitfield bits = 0;
         glColorMask(c.clear_color, c.clear_color, c.clear_color, c.clear_alpha);
         if (c.clear_color || c.clear_alpha) bits |= GL_COLOR_BUFFER_BIT;
@@ -2760,10 +2820,10 @@ static bool g_pair_second = false;
 static const char* g_dump_suffix = "";
 
 static void dump_efb(const EfbCopyCmd& c) {
-    int w = c.src_w * g_scale, h = c.src_h * g_scale;
+    int w = efb_px(c.src_x + c.src_w) - efb_px(c.src_x), h = c.src_h * g_scale;
     std::vector<uint8_t> px((size_t)w * h * 4), flipped((size_t)w * h * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
-    glReadPixels(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+    glReadPixels(efb_px(c.src_x), (EFB_H - c.src_y - c.src_h) * g_scale, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
     for (int y = 0; y < h; y++) {
         memcpy(&flipped[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4], (size_t)w * 4);
         for (int x = 0; x < w; x++) flipped[((size_t)y * w + x) * 4 + 3] = 255;
@@ -2797,10 +2857,11 @@ static void blit_rect_to_output(GLuint src_tex, uint32_t tex_w, uint32_t tex_h, 
     glViewport(0, 0, g_win_w, g_win_h);
     glClearColor(0, 0, 0, 1);
     glClear(GL_COLOR_BUFFER_BIT);
-    // Letterbox to 4:3
+    // Letterbox to the output's aspect (4:3, or wider: g_wide)
     int w = g_win_w, h = g_win_h;
-    int vw = w, vh = w * 3 / 4;
-    if (vh > h) { vh = h; vw = h * 4 / 3; }
+    const double aspect = 4.0 / 3.0 * g_wide;
+    int vw = w, vh = (int)std::lround(w / aspect);
+    if (vh > h) { vh = h; vw = (int)std::lround(h * aspect); }
     glViewport((w - vw) / 2, (h - vh) / 2, vw, vh);
     glUseProgram(g_blit_prog);
     glActiveTexture(GL_TEXTURE0);
@@ -2829,6 +2890,15 @@ struct Xfb {
 };
 static std::vector<Xfb> g_xfbs;
 
+// The XFBs are allocated at the EFB's scale and aspect; a change of either drops them.
+static void xfbs_drop() {
+    for (auto& x : g_xfbs) {
+        glDeleteFramebuffers(1, &x.fbo);
+        glDeleteTextures(1, &x.tex);
+    }
+    g_xfbs.clear();
+}
+
 static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
     for (auto& x : g_xfbs)
         if (x.stride == stride && x.h == h && dest >= x.base && dest < x.base + stride * h) return x;
@@ -2838,7 +2908,7 @@ static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
     x.h = h;
     glGenTextures(1, &x.tex);
     glBindTexture(GL_TEXTURE_2D, x.tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)(w * g_scale), (GLsizei)(h * g_scale), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)efb_px(w), (GLsizei)(h * g_scale), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glGenFramebuffers(1, &x.fbo);
@@ -2853,7 +2923,7 @@ static Xfb& xfb_for(uint32_t dest, uint32_t w, uint32_t stride, uint32_t h) {
 }
 
 static void dump_xfb(const Xfb& x, uint32_t w) {
-    int pw = w * g_scale, ph = x.h * g_scale;
+    int pw = efb_px(w), ph = x.h * g_scale;
     std::vector<uint8_t> px((size_t)pw * ph * 4), flipped((size_t)pw * ph * 4);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, x.fbo);
     glReadPixels(0, 0, pw, ph, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
@@ -2877,8 +2947,8 @@ static Xfb* xfb_write(const EfbCopyCmd& c) {
     glBindFramebuffer(GL_READ_FRAMEBUFFER, g_efb_fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, x.fbo);
     glDisable(GL_SCISSOR_TEST);
-    glBlitFramebuffer(c.src_x * g_scale, (EFB_H - c.src_y - c.src_h) * g_scale, (c.src_x + c.src_w) * g_scale, (EFB_H - c.src_y) * g_scale,
-                      0, (h - row0 - rows) * g_scale, c.dst_w * g_scale, (h - row0) * g_scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer(efb_px(c.src_x), (EFB_H - c.src_y - c.src_h) * g_scale, efb_px(c.src_x + c.src_w), (EFB_H - c.src_y) * g_scale,
+                      0, (h - row0 - rows) * g_scale, efb_px(c.dst_w), (h - row0) * g_scale, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     for (uint32_t r = row0; r < row0 + rows; r++)
         if (!x.written[r]) { x.written[r] = 1; x.written_rows++; }
     if (x.written_rows < h) return nullptr;
@@ -2925,6 +2995,65 @@ static void present(const EfbCopyCmd& c) {
 void render_set_output_fbo(unsigned fbo) { g_output_fbo = (GLuint)fbo; }
 uint32_t present_count() { return g_present_count; }
 
+
+// Which of the batch's draws are drawn at the full width of a widened EFB rather than
+// taken in (g_wide, g_xk_vp, g_xk_scr): g_wide_full[i] for command i.
+//  - A draw into a texture: one whose next copy goes to a texture, covers less than the
+//    whole picture, and holds the draw's viewport. Its copy is of the rect the game
+//    drew it in, so it has to be found there (a shadow, a reflection, an item drawn to
+//    a texture). A whole-picture scene followed by a small copy of part of it is not one:
+//    its viewport is not inside the copy.
+//  - A layer over the whole picture: an orthographic draw whose triangles span the
+//    picture in its projection's clip space and cover most of it, in a viewport as wide
+//    as the EFB -- a background, a fade, a grab of the screen drawn back -- which is
+//    meant to fill the screen, and does.
+static void classify_wide(const Batch& b) {
+    g_wide_full.assign(b.cmds.size(), 0);
+    if (g_wide == 1.0) return;
+    auto viewport_x = [](const PixelState& st, float& x0, float& x1) {
+        int xoff, yoff;
+        scissor_offset(st.bp, xoff, yoff);
+        const float c = st.viewport[3] - xoff, half = std::fabs(st.viewport[0]);
+        x0 = c - half;
+        x1 = c + half;
+    };
+    // The next copy after each command, walked backwards.
+    const EfbCopyCmd* next = nullptr;
+    for (size_t i = b.cmds.size(); i-- > 0;) {
+        const Cmd& c = b.cmds[i];
+        if (c.type == CmdType::EfbCopy || c.type == CmdType::Present) {
+            next = &c.copy;
+            continue;
+        }
+        if (c.type != CmdType::Draw) continue;
+        const PixelState& st = b.states[c.state];
+        float x0, x1;
+        viewport_x(st, x0, x1);
+        if (next && !next->to_xfb && next->tex_id) {
+            const bool whole = next->src_w >= EFB_W - 8;
+            if (!whole && x0 >= (float)next->src_x - 1.0f && x1 <= (float)(next->src_x + next->src_w) + 1.0f) {
+                g_wide_full[i] = 1;
+                continue;
+            }
+        }
+        if ((int)st.proj[6] == 0 || c.prim != 0 || c.count < 3) continue;
+        if (x0 > 2.0f || x1 < EFB_W - 2.0f) continue;
+        float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, area = 0.0f;
+        auto clip = [&](uint32_t v, float& x, float& y) {
+            const float* pos = b.verts[b.indices[c.first + v]].pos;
+            x = st.proj[0] * pos[0] + st.proj[1];
+            y = st.proj[2] * pos[1] + st.proj[3];
+        };
+        for (uint32_t t = 0; t + 2 < c.count; t += 3) {
+            float xa, ya, xb, yb, xc, yc;
+            clip(t, xa, ya); clip(t + 1, xb, yb); clip(t + 2, xc, yc);
+            bx0 = std::min({bx0, xa, xb, xc}); bx1 = std::max({bx1, xa, xb, xc});
+            by0 = std::min({by0, ya, yb, yc}); by1 = std::max({by1, ya, yb, yc});
+            area += 0.5f * std::fabs((xb - xa) * (yc - ya) - (xc - xa) * (yb - ya));
+        }
+        if (bx0 <= -0.98f && bx1 >= 0.98f && by0 <= -0.98f && by1 >= 0.98f && area >= 3.0f) g_wide_full[i] = 1;
+    }
+}
 
 // Executes a batch. Returns true if it contained a Present.
 // The camera looks down by `pitch`, so the world's up arrives at (0, cos, sin) in the
@@ -3735,6 +3864,7 @@ static bool late_panel_view(const Batch& b, const Cmd& c, float out[16]) {
 }
 
 bool render_execute_eye(Batch& b, unsigned fbo, int w, int h, bool do_copies) {
+    g_xk_vp = g_xk_scr = 1.0f;  // an eye draws in its own space: no widescreen (g_wide)
     // The scene samples textures the game produces by copying them back out of the EFB:
     // the water reflection, the sprite sheet the spray uses. An eye pass never draws into
     // the EFB, so on its own it would copy out an empty one -- which once left a model
@@ -4188,7 +4318,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         ms_vbo = frametime_on() ? ms_since(t_start) - ms_tex : 0.0;
     }
     glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
-    glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+    glViewport(0, 0, efb_pw(), EFB_H * g_scale);
     glBindVertexArray(g_vao);
     uint32_t n_apply = 0;
     note_fullscreen_copies(b);
@@ -4207,6 +4337,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
     uint32_t cur_state = UINT32_MAX;
     gl_state_invalidate();
     view_invalidate();   // the flat view, after an eye
+    classify_wide(b);
     memset(g_zplane, 0, sizeof(g_zplane));  // none yet this frame
     int cur_prim = -1;
     // GCN_NO_COMP drops draws that sample a copy of the whole frame, in the flat path too.
@@ -4445,9 +4576,22 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             if (comp && no_comp) break;
             // A triangle drawn without z freeze is the plane the next z freeze draws take,
             // culled or not: a game draws one it culls to set the plane.
+            // This draw's widescreen factor (classify_wide), which the viewport and the
+            // scissor are applied with: a change of it is a change of state.
+            // A camera's picture widens within its viewport; 3D in a small viewport is part
+            // of the 2D around it (a portrait in a menu's bubble, an item turning in a box)
+            // and goes where that goes, at its own proportions. A split screen's halves are
+            // cameras: anything under about half the width is taken as the 2D's.
+            const float k = g_wide == 1.0 || g_wide_full[ci] ? 1.0f : (float)(1.0 / g_wide);
+            const PixelState& wst = b.states[c.state];
+            const bool camera = (int)wst.proj[6] == 0 && 2.0f * std::fabs(wst.viewport[0]) >= 0.45f * EFB_W;
+            const float kvp = camera ? k : 1.0f, kscr = camera ? 1.0f : k;
+            const bool new_xk = kvp != g_xk_vp || kscr != g_xk_scr;
+            g_xk_vp = kvp;
+            g_xk_scr = kscr;
             const bool zfreeze = (b.states[c.state].bp[0x00] >> 19) & 1;
             if (!zfreeze) zfreeze_plane(b, c, g_zplane);
-            if (c.state != cur_state || c.prim != cur_prim) {
+            if (c.state != cur_state || c.prim != cur_prim || new_xk) {
                 apply_state(b.states[c.state], c.prim);
                 cur_state = c.state;
                 cur_prim = c.prim;
@@ -4481,7 +4625,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                     glFinish();
                     for (size_t pi = 0; pi < probes.size(); pi++) {
                         uint8_t px[4] = {0, 0, 0, 0};
-                        const int gx = probes[pi].first * g_scale, gy = (EFB_H - 1 - probes[pi].second) * g_scale;
+                        const int gx = efb_px(probes[pi].first), gy = (EFB_H - 1 - probes[pi].second) * g_scale;
                         glReadPixels(gx, gy, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
                         float depth = -1.0f;
                         glReadPixels(gx, gy, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
@@ -4506,7 +4650,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
                         c.copy.src_x, c.copy.src_y, c.copy.dest, c.copy.tex_id, c.copy.format, c.copy.to_xfb ? " (display)" : "");
             do_efb_copy(c.copy);
             if (frametime_on()) ms_copy += ms_since(t_copy);
-            glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+            glViewport(0, 0, efb_pw(), EFB_H * g_scale);
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             break;
@@ -4515,7 +4659,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
             if (do_present) present(c.copy);
             presented = true;
             glBindFramebuffer(GL_FRAMEBUFFER, g_efb_fbo);
-            glViewport(0, 0, EFB_W * g_scale, EFB_H * g_scale);
+            glViewport(0, 0, efb_pw(), EFB_H * g_scale);
             cur_state = UINT32_MAX;
             gl_state_invalidate();
             break;
