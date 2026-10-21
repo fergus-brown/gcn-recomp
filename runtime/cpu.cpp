@@ -15,6 +15,13 @@
 #include <vector>
 #include <cstdlib>
 #include <cmath>
+#ifdef _WIN32
+// winmm's and kernel32's, declared here rather than through <windows.h> and its macros.
+extern "C" __declspec(dllimport) unsigned int __stdcall timeBeginPeriod(unsigned int ms);
+extern "C" __declspec(dllimport) void* __stdcall GetCurrentProcess();
+extern "C" __declspec(dllimport) int __stdcall SetProcessInformation(void* process, int info_class, void* info,
+                                                                       unsigned long size);
+#endif
 
 uint8_t* g_mem;
 uint8_t* g_aram;
@@ -453,6 +460,18 @@ double clock_cpu_scale() { return (double)kTicksPerEdge / (double)g_ticks_per_ed
 
 void timing_init() {
     g_t0 = std::chrono::steady_clock::now();
+#ifdef _WIN32
+    // clock_pace holds virtual time to real time by sleeping, and a Windows sleep ends on
+    // the scheduler's tick, 15.6 ms unless a program asks for finer: a frame then woke up
+    // to ~8 ms late and the next one ran early to make it up, a steady 8/24 ms stutter
+    // through a session running at an average 60 fps.
+    timeBeginPeriod(1);
+    // Windows may run a process it judges to be in the background at a lower clock
+    // ("EcoQoS" power throttling); a game paced in real time sleeps between frames, which
+    // makes it look idle. Opted out, as games are expected to.
+    struct { unsigned long version, control_mask, state_mask; } throttle = {1, 0x1 /* EXECUTION_SPEED */, 0};
+    SetProcessInformation(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &throttle, sizeof(throttle));
+#endif
     if (const char* e = getenv("GCN_CLOCK")) g_virtual_clock = strcmp(e, "host") != 0;
     if (const char* e = getenv("GCN_TIMESCALE")) {
         double s = atof(e);
@@ -557,6 +576,21 @@ static void clock_jump(uint64_t edges) {
 // which is at least every SI poll (1/120 s). When the host falls behind, the shortfall is
 // caught up (above) or, under GCN_CATCHUP=0 or in a replay with no jump recorded here,
 // forgiven: the game then slows down instead of fast-forwarding later.
+// GCN_SPIN_WAIT=0|1: whether clock_pace spins (below). On by default where the host is a
+// desktop or laptop, off on Android, where the battery matters more.
+#if defined(__ANDROID__)
+static const bool g_spin_wait = getenv("GCN_SPIN_WAIT") && atoi(getenv("GCN_SPIN_WAIT")) != 0;
+#else
+static const bool g_spin_wait = !(getenv("GCN_SPIN_WAIT") && atoi(getenv("GCN_SPIN_WAIT")) == 0);
+#endif
+static inline void cpu_relax() {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__)
+    __builtin_ia32_pause();
+#elif defined(__aarch64__)
+    __asm__ __volatile__("yield");
+#endif
+}
+
 void clock_pace() {
     clock_log();
     if (!g_virtual_clock) return;
@@ -566,7 +600,17 @@ void clock_pace() {
     int64_t ahead = virt_ns - (int64_t)host_ns() - g_pace_offset_ns;
     if (ahead > 300000) {
         if (ahead > 50000000) ahead = 50000000;
-        std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
+        // Waited out in a spin rather than a sleep (GCN_SPIN_WAIT, on by default on a
+        // desktop): a laptop's CPU lowers its clock while the guest sleeps between frames,
+        // and the next frame's work then ran slow enough to miss its retrace. A board scene
+        // dropped 35% of its frames that way and 15% with a core kept busy beside it. A
+        // wait longer than a field (a load, a fade) still sleeps.
+        if (g_spin_wait && ahead < 20000000) {
+            const uint64_t until = host_ns() + (uint64_t)ahead;
+            while (host_ns() < until) cpu_relax();
+        } else {
+            std::this_thread::sleep_for(std::chrono::nanoseconds(ahead));
+        }
     } else if (ahead < -kForgiveNs) {
         g_pace_offset_ns += ahead;  // too far behind: re-anchor
     } else if (ahead < -kCatchupNs && g_catchup && !input_replay_active() && !netplay_active()) {
