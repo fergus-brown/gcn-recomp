@@ -968,17 +968,24 @@ its x taken in by `1 / g_wide` in one of two ways:
 - **2D**, and 3D in a small viewport (a portrait inside a menu bubble), is taken in about
   the centre of the picture, scissor included, so it keeps its size and stays in the middle.
 
-`classify_wide` leaves three kinds of draw at full width:
+`classify_wide` leaves these draws at full width:
 
 - an orthographic layer that spans the whole picture (a background, a fade, a screen grab
   drawn back);
 - an untextured orthographic band, each of whose triangles spans the picture's width (a
   film's letterbox bars, a strip behind a ticker). It covers too little of the picture to
   count as a layer, but is meant to reach both edges;
+- an untextured orthographic panel that spans the picture's height and reaches its left or
+  right edge, or spans its width and reaches the top or bottom (a wipe's leading panel);
+- an orthographic draw that samples a copy of the whole picture and reaches one of its
+  edges: a grab of the screen drawn back over part of it, the old picture sliding off in
+  a wipe. The copy holds the whole widened picture, so taken in it would be squeezed into
+  the middle. One that touches no edge (a thumbnail of the screen in a menu) is still
+  taken in;
 - a draw rendered into a texture, meaning its next copy is to a texture, covers less than
   the picture and contains the draw's viewport. The copy must find it where the game put it.
 
-A partial copy to a texture whose last draw was narrowed (not one of the three kinds
+A partial copy to a texture whose last draw was narrowed (not one of the kinds
 above) reads and clears its rectangle narrowed the same way. Otherwise it copies the
 wrong part of the EFB: a face drawn in a menu and copied into its bubble came out shifted
 towards the middle. That mapping suits 2D and a camera centred on the picture; a copy of

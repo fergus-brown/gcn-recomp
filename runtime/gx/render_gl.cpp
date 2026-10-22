@@ -3027,12 +3027,22 @@ uint32_t present_count() { return g_present_count; }
 //  - A band across the picture: an untextured orthographic draw, in a viewport as wide as
 //    the EFB, each of whose triangles spans the picture's width -- a film's letterbox
 //    bars, a strip behind a ticker -- which is meant to reach both edges.
+//  - A panel against an edge: an untextured orthographic draw, in a viewport as wide as the
+//    EFB, that spans the picture's height and reaches its left or right edge, or spans its
+//    width and reaches the top or bottom -- a wipe's leading panel, sliding across with the
+//    pictures either side of it, which are drawn full width too (below).
+//  - A grab of the screen drawn back over part of it: an orthographic draw, in a viewport
+//    as wide as the EFB, that samples a copy of the whole picture and reaches one of its
+//    edges -- the old picture sliding off in a wipe, across or up. The copy is of the whole
+//    widened picture, so taken in it would be squeezed into the middle. One that touches
+//    no edge (a thumbnail of the screen in a menu) is still taken in.
 // And which copies are of draws that were taken in, g_wide_full[i] = 2: a copy to a texture
 // of less than the whole picture whose last draw was not drawn full width. Its rect is
 // taken in as they were, or it copies the wrong part of the EFB -- a face drawn in a menu
 // and copied into its bubble came out shifted towards the middle. (That is the mapping of
 // a 2D draw and of a camera centred on the picture; a split screen's half copied to a
 // texture would need its own.)
+static bool samples_fullscreen_copy(const PixelState& st);
 static void classify_wide(const Batch& b) {
     g_wide_full.assign(b.cmds.size(), 0);
     if (g_wide == 1.0) return;
@@ -3081,6 +3091,11 @@ static void classify_wide(const Batch& b) {
         }
         if (bx0 <= -0.98f && bx1 >= 0.98f && by0 <= -0.98f && by1 >= 0.98f && area >= 3.0f) g_wide_full[i] = 1;
         else if (bands) g_wide_full[i] = 1;
+        else if (st.num_texgens == 0 && ((by0 <= -0.98f && by1 >= 0.98f && (bx0 <= -0.98f || bx1 >= 0.98f)) ||
+                                         (bx0 <= -0.98f && bx1 >= 0.98f && (by0 <= -0.98f || by1 >= 0.98f))))
+            g_wide_full[i] = 1;
+        else if ((bx0 <= -0.98f || bx1 >= 0.98f || by0 <= -0.98f || by1 >= 0.98f) && samples_fullscreen_copy(st))
+            g_wide_full[i] = 1;
     }
     bool last_narrow = false;
     for (size_t i = 0; i < b.cmds.size(); i++) {
