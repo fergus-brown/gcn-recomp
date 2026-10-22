@@ -3024,6 +3024,9 @@ uint32_t present_count() { return g_present_count; }
 //    picture in its projection's clip space and cover most of it, in a viewport as wide
 //    as the EFB -- a background, a fade, a grab of the screen drawn back -- which is
 //    meant to fill the screen, and does.
+//  - A band across the picture: an untextured orthographic draw, in a viewport as wide as
+//    the EFB, each of whose triangles spans the picture's width -- a film's letterbox
+//    bars, a strip behind a ticker -- which is meant to reach both edges.
 // And which copies are of draws that were taken in, g_wide_full[i] = 2: a copy to a texture
 // of less than the whole picture whose last draw was not drawn full width. Its rect is
 // taken in as they were, or it copies the wrong part of the EFB -- a face drawn in a menu
@@ -3062,6 +3065,7 @@ static void classify_wide(const Batch& b) {
         if ((int)st.proj[6] == 0 || c.prim != 0 || c.count < 3) continue;
         if (x0 > 2.0f || x1 < EFB_W - 2.0f) continue;
         float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, area = 0.0f;
+        bool bands = st.num_texgens == 0;
         auto clip = [&](uint32_t v, float& x, float& y) {
             const float* pos = b.verts[b.indices[c.first + v]].pos;
             x = st.proj[0] * pos[0] + st.proj[1];
@@ -3073,8 +3077,10 @@ static void classify_wide(const Batch& b) {
             bx0 = std::min({bx0, xa, xb, xc}); bx1 = std::max({bx1, xa, xb, xc});
             by0 = std::min({by0, ya, yb, yc}); by1 = std::max({by1, ya, yb, yc});
             area += 0.5f * std::fabs((xb - xa) * (yc - ya) - (xc - xa) * (yb - ya));
+            if (std::min({xa, xb, xc}) > -0.98f || std::max({xa, xb, xc}) < 0.98f) bands = false;
         }
         if (bx0 <= -0.98f && bx1 >= 0.98f && by0 <= -0.98f && by1 >= 0.98f && area >= 3.0f) g_wide_full[i] = 1;
+        else if (bands) g_wide_full[i] = 1;
     }
     bool last_narrow = false;
     for (size_t i = 0; i < b.cmds.size(); i++) {
