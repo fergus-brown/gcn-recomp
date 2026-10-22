@@ -62,3 +62,11 @@ burnout
 point of impact
 \bcriterion\b
 \bGB4E51\b
+
+# LEGO Star Wars: The Video Game (lego-starwars-recomp)
+\blego\b
+star ?wars
+\bGL5E4F\b
+traveller'?s tales
+\bnu2api\b
+\bjedi\b
