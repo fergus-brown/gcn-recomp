@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <mutex>
 #include <vector>
+#include <cstdlib>
 
 uint32_t ai_volume_left();
 uint32_t ai_volume_right();

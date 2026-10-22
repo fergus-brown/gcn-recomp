@@ -2,6 +2,7 @@
 #include "../runtime.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 
 static uint16_t g_vi[0x80];
 static uint64_t g_frame_start;

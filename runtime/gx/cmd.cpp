@@ -3,6 +3,7 @@
 #include "gx.h"
 #include "texture.h"
 #include <cmath>
+#include <cstdlib>
 
 const char* func_name(uint32_t addr);
 void pe_signal_token(uint16_t token, bool interrupt);

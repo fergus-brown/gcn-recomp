@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <cstdlib>
 
 static uint16_t g_dspcr;
 static uint16_t g_mbox_in_h, g_mbox_in_l;

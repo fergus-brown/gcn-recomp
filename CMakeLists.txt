@@ -66,6 +66,9 @@ endmacro()
 # every project's desktop builds share. Built inside each build directory, it was half of
 # a desktop build's compile time on a two-core machine. A lock keeps two configures from
 # building it at once; delete the directory to build it again.
+# GCN_SDL2_SOURCE: SDL2's release tarball on disk, for a build with no network (a release's
+# builder bundles it); otherwise it is downloaded.
+set(GCN_SDL2_SOURCE "" CACHE FILEPATH "SDL2-2.30.9.tar.gz to build SDL2 from instead of downloading it")
 function(_gcn_sdl2_shared out_target)
   set(_ver 2.30.9)
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -88,13 +91,24 @@ function(_gcn_sdl2_shared out_target)
       message(STATUS "Building SDL2 ${_ver} into ${_prefix} (once for every project)")
       set(_work ${_prefix}-work)
       file(REMOVE_RECURSE ${_work} ${_prefix})
-      file(DOWNLOAD https://github.com/libsdl-org/SDL/releases/download/release-${_ver}/SDL2-${_ver}.tar.gz
-           ${_work}/SDL2.tar.gz
-           EXPECTED_HASH SHA256=24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4
-           STATUS _st)
-      list(GET _st 0 _code)
-      if(NOT _code EQUAL 0)
-        message(FATAL_ERROR "downloading SDL2 failed: ${_st}")
+      set(_sdl_hash 24b574f71c87a763f50704bbb630cbe38298d544a1f890f099a4696b1d6beba4)
+      if(GCN_SDL2_SOURCE)
+        # An offline build: the release tarball given, checked as a download would be.
+        file(SHA256 ${GCN_SDL2_SOURCE} _got)
+        if(NOT _got STREQUAL _sdl_hash)
+          message(FATAL_ERROR "${GCN_SDL2_SOURCE} is not SDL2-${_ver}.tar.gz (SHA256 ${_got})")
+        endif()
+        file(MAKE_DIRECTORY ${_work})
+        file(COPY_FILE ${GCN_SDL2_SOURCE} ${_work}/SDL2.tar.gz)
+      else()
+        file(DOWNLOAD https://github.com/libsdl-org/SDL/releases/download/release-${_ver}/SDL2-${_ver}.tar.gz
+             ${_work}/SDL2.tar.gz
+             EXPECTED_HASH SHA256=${_sdl_hash}
+             STATUS _st)
+        list(GET _st 0 _code)
+        if(NOT _code EQUAL 0)
+          message(FATAL_ERROR "downloading SDL2 failed: ${_st}")
+        endif()
       endif()
       file(ARCHIVE_EXTRACT INPUT ${_work}/SDL2.tar.gz DESTINATION ${_work})
       set(_args -S ${_work}/SDL2-${_ver} -B ${_work}/build -G ${CMAKE_GENERATOR}

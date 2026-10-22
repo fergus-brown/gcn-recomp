@@ -89,6 +89,11 @@ void fatal(const char* fmt, ...) {
 #else
 #include <cpuid.h>
 #endif
+// _xgetbv is an xsave instruction, which GCC-style compilers only emit in a function that
+// asks for it; the check below runs it only where the CPU says the OS supports it.
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((target("xsave")))
+#endif
 static void cpu_check_fma() {
     unsigned r[4];
 #if defined(_WIN32)

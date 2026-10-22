@@ -3,6 +3,7 @@
 #include "../platform.h"
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 
 std::atomic<uint32_t> g_pi_intsr{0}, g_pi_intmr{0};
 static uint32_t g_pi_fifo_base, g_pi_fifo_end, g_pi_fifo_wptr;
