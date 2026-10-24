@@ -13,7 +13,11 @@
 //
 // `spec` null or empty falls back to the GCN_INPUT environment variable, which an
 // Android app has no way to set -- it passes the script in directly instead.
+// GCN_INPUT2 scripts the second controller the same way (a second player, say).
 void input_script_init(const char* spec = nullptr);
 
-// Overlays any press that is active at the current presented-frame count.
-void input_script_apply(PadState& p);
+// Overlays any press for channel `chan` that is active at the current presented-frame count.
+void input_script_apply(PadState& p, int chan = 0);
+
+// Whether channel `chan` has a script (the frontend then plugs that controller in).
+bool input_script_has(int chan);

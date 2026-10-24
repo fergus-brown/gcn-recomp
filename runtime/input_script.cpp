@@ -9,15 +9,22 @@
 #include <vector>
 
 namespace {
-struct ScriptedPress { uint32_t at, dur; uint16_t buttons; int sx, sy; };
+struct ScriptedPress { uint32_t at, dur; uint16_t buttons; int sx, sy, chan; };
 std::vector<ScriptedPress> g_script;
 bool g_log;
+void parse(const char* spec, int chan);
 }  // namespace
 
 void input_script_init(const char* spec) {
     g_log = getenv("GCN_INPUT_LOG") != nullptr;
     if (!spec || !*spec) spec = getenv("GCN_INPUT");
-    if (!spec || !*spec) return;
+    if (spec && *spec) parse(spec, 0);
+    if (const char* s2 = getenv("GCN_INPUT2")) parse(s2, 1);
+    if (g_log) fprintf(stderr, "[input] %zu scripted press(es)\n", g_script.size());
+}
+
+namespace {
+void parse(const char* spec, int chan) {
     std::string s = spec;
     size_t pos = 0;
     while (pos < s.size()) {
@@ -27,7 +34,7 @@ void input_script_init(const char* spec) {
         pos = end + 1;
         size_t c1 = item.find(':'), c2 = item.rfind(':');
         if (c1 == std::string::npos || c2 == c1) continue;
-        ScriptedPress p{(uint32_t)atoi(item.c_str()), (uint32_t)atoi(item.c_str() + c2 + 1), 0, 0, 0};
+        ScriptedPress p{(uint32_t)atoi(item.c_str()), (uint32_t)atoi(item.c_str() + c2 + 1), 0, 0, 0, chan};
         std::string btns = item.substr(c1 + 1, c2 - c1 - 1);
         size_t bp = 0;
         while (bp <= btns.size()) {
@@ -50,15 +57,20 @@ void input_script_init(const char* spec) {
         }
         g_script.push_back(p);
     }
-    if (g_log) fprintf(stderr, "[input] %zu scripted press(es)\n", g_script.size());
+}
+}  // namespace
+
+bool input_script_has(int chan) {
+    for (auto& s : g_script) if (s.chan == chan) return true;
+    return false;
 }
 
-void input_script_apply(PadState& p) {
+void input_script_apply(PadState& p, int chan) {
     if (g_script.empty()) return;
     uint32_t frame = gx::g_frames_submitted.load();  // time base: presented game frames
     for (auto& s : g_script) {
-        if (frame >= s.at && frame < s.at + s.dur) {
-            if (g_log) fprintf(stderr, "[input] frame %u press %04X\n", frame, s.buttons);
+        if (s.chan == chan && frame >= s.at && frame < s.at + s.dur) {
+            if (g_log) fprintf(stderr, "[input] frame %u press %04X (channel %d)\n", frame, s.buttons, chan + 1);
             p.buttons |= s.buttons;
             if (s.sx) p.stick_x = (uint8_t)(128 + s.sx);
             if (s.sy) p.stick_y = (uint8_t)(128 + s.sy);

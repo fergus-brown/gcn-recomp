@@ -218,6 +218,12 @@ static void update_pad() {
     merge_desktop_pad(p);
     input_script_apply(p);
     pad_set_state(0, p);
+    if (input_script_has(1)) {
+        PadState q;
+        q.connected = true;
+        input_script_apply(q, 1);
+        pad_set_state(1, q);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +461,12 @@ int main(int argc, char** argv) {
             p.connected = true;
             input_script_apply(p);
             pad_set_state(0, p);
+            if (input_script_has(1)) {
+                PadState q;
+                q.connected = true;
+                input_script_apply(q, 1);
+                pad_set_state(1, q);
+            }
             auto b = gx::take_batch(5);  // discard
             (void)b;
         }

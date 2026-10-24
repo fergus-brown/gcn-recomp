@@ -101,6 +101,10 @@ numbers the dumps carry; `GCN_INPUT_LOG=1` shows the count. It prints each press
 scripted press is recorded in the input log like any other, so a script is one way to make
 a log.
 
+`GCN_INPUT2` scripts the second controller the same way, and plugs it in: a second player
+joining and moving, with no second pad or online session (the desktop frontend otherwise
+feeds the first controller only).
+
 ## Frame dumps
 
 `--hidden --dump-dir=DIR --dump-every=N` runs with the window hidden and writes every Nth
