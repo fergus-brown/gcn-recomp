@@ -964,6 +964,9 @@ its x taken in by `1 / g_wide` in one of two ways:
   its proportions and the sides open out, while the game's culling and its 3D-to-2D
   placement still assume 4:3. Objects culled by the game at the old edges can therefore pop
   in the new margins; fixing that is a game hook (its cull test), not a renderer change.
+  Such a hook reads `game_aspect()` (`game_aspect.h`), not `render_aspect()`: what a game
+  culls is game state, so the aspect it widens by changes only at a pad poll, is logged
+  and replayed like input, and in an online session is the widest of the players'.
   Each half of a split screen widens within its own half.
 - **2D**, and 3D in a small viewport (a portrait inside a menu bubble), is taken in about
   the centre of the picture, scissor included, so it keeps its size and stays in the middle.

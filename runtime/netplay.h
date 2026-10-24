@@ -17,8 +17,9 @@
 // The topology is a star: clients talk to the host only, and the host relays. Only the
 // host needs a port others can reach. Before the game boots, each client sends the host
 // its build's identity (the recompiled function table and every module's fingerprint), and
-// the host sends back its memory card, the RTC's start time and the client's channel.
-// Every peer then boots on the same card and clock.
+// the host sends back its memory card, the RTC's start time and the client's channel, and
+// with the start the session's aspect (game_aspect.h). Every peer then boots on the same
+// card and clock, and culls alike.
 //
 // While the game runs, each peer hashes guest RAM every few seconds and the host compares:
 // a mismatch is a desync, reported on both sides (the run goes on; the input logs are what
@@ -28,17 +29,21 @@
 #include <string>
 
 // Host a session on `port` for `players` players (2-4) including the host, which plays
-// channel 0. `card` is the host's memory card, sent to every client. Blocks until every
-// client has joined and received it; false on a network error.
-bool netplay_host(int port, int players, int delay, const std::string& card);
+// channel 0. `aspect` is the picture's aspect the host displays (game_aspect.h). `card` is
+// the host's memory card, sent to every client. Blocks until every client has joined and
+// received it; false on a network error.
+bool netplay_host(int port, int players, int delay, double aspect, const std::string& card);
 
 // Join the session at `host` ("address:port"). The host's card is written to `card_out`,
 // which the frontend then uses as the memory card. Blocks until the host starts the
 // session; false if it cannot be joined.
-bool netplay_join(const char* host, const std::string& card_out);
+bool netplay_join(const char* host, double aspect, const std::string& card_out);
 
 // Whether a session is in progress.
 bool netplay_active();
+
+// The session's aspect, the widest any player displays, for game_aspect.h.
+double netplay_aspect();
 
 // The SI's poll tick, on the guest thread: sends the local controller's state (`local`) for
 // a later tick and waits until this tick's states have arrived.
@@ -46,6 +51,10 @@ void netplay_tick(const PadState& local);
 
 // The state channel `chan` reads this tick. True while a session is in progress.
 bool netplay_pad(int chan, PadState& s);
+
+// The desync hash of guest RAM as it is now, less what netplay_hash_exclude left out. Also
+// GCN_RAMHASH's (diagnostics.md), to compare a run with its replay.
+uint64_t netplay_ram_hash();
 
 // Leave [addr, addr + size) of guest RAM out of the desync hash: memory a game's hook writes
 // for the picture alone, which peers drawing differently (one at 16:9, one at 4:3) hold

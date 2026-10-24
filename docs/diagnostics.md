@@ -66,6 +66,18 @@ went to the live pose -- in the harness its stand-in eyes, tracked and level -- 
 session, with 123 such stretches, parted from its recording within minutes. A lost pose now
 replays as lost.
 
+The aspect a game's hooks cull to (`game_aspect.h`) is input in the same way, as
+`pose aspect`: one read per pad poll, logged when it changes. A replay culls as its
+recording did whatever `--aspect` it is shown at, and an F9 in the middle of a session
+replays too. A log without the line replays at the replaying run's aspect, as before.
+
+`GCN_RAMHASH=<polls>` prints `[ramhash] poll <n> frame <f> <hash>` every that many pad polls:
+the online desync hash of guest RAM (`netplay.md`), less the ranges a game left out of it.
+A recording and its replay print the same lines; the first that differs brackets where
+they parted. `GCN_RAMHASH_DUMP=<dir>` also writes guest RAM beside each hash
+(`ram_<poll>.bin`), to diff where two runs differ. Two runs that are not replays of one
+another are no test: their clocks catch up at different points ("The clock").
+
 A replay that parts from its recording says so, once: `[input] the replay has parted from its
 recording: <what> at poll <n> (frame <f>), recorded between polls <a> and <b>`. Each jump and
 each pose record carries the polls of the pad lines either side of it in the log, so when the

@@ -2,6 +2,7 @@
 #include "../runtime.h"
 #include "../input_log.h"
 #include "../netplay.h"
+#include "../game_aspect.h"
 #include "pad.h"
 #include <mutex>
 
@@ -115,6 +116,23 @@ void si_poll_tick() {
         }
         netplay_tick(live);
     }
+    game_aspect_poll();
+    // GCN_RAMHASH=<polls>: the desync hash every that many polls, for comparing two runs
+    // (a recording and its replay) without a session.
+    static const uint32_t hash_every = getenv("GCN_RAMHASH") ? (uint32_t)atoi(getenv("GCN_RAMHASH")) : 0;
+    static uint32_t polls;
+    if (hash_every && polls % hash_every == 0) {
+        extern uint32_t gx_frames_submitted();
+        fprintf(stderr, "[ramhash] poll %u frame %u %016llx\n", polls, gx_frames_submitted(),
+                (unsigned long long)netplay_ram_hash());
+        // GCN_RAMHASH_DUMP=<dir>: guest RAM with each hash, to diff where two runs differ.
+        if (const char* dd = getenv("GCN_RAMHASH_DUMP")) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/ram_%06u.bin", dd, polls);
+            if (FILE* f = fopen(path, "wb")) { fwrite(HOST(0x80000000u), 1, RAM_SIZE, f); fclose(f); }
+        }
+    }
+    polls++;
     uint32_t en = (g_poll >> 4) & 0xF;
     for (int chan = 0; chan < 4; chan++) {
         if (!(en & (0x8 >> chan))) continue;

@@ -37,7 +37,7 @@ using socklen_type = socklen_t;
 namespace {
 
 constexpr uint32_t kMagic = 0x4E504C59;  // "NPLY"
-constexpr uint32_t kVersion = 1;
+constexpr uint32_t kVersion = 2;
 constexpr int kMaxPlayers = 4;
 constexpr uint32_t kRing = 1024;          // ticks of state kept; far more than the delay
 constexpr int kResend = 32;               // ticks of history each input packet carries
@@ -59,6 +59,7 @@ struct Peer {
     uint32_t card_have = 0;          // card bytes it has acknowledged
     uint32_t inputs_through = 0;     // host: the ticks of its input received contiguously (+1)
     uint32_t frames_through = 0;     // host: the frames it has acknowledged (+1)
+    float aspect = 0;                // host: the aspect it displays
     std::chrono::steady_clock::time_point seen;
 };
 Peer g_peers[kMaxPlayers];           // host: indexed by channel (0 is the host itself)
@@ -81,6 +82,7 @@ std::vector<uint8_t> g_card;
 time_t g_epoch = 0;
 int g_utc_offset = 0;
 uint64_t g_build = 0;
+float g_aspect = 0;                  // the session's aspect (game_aspect.h)
 std::chrono::steady_clock::time_point g_last_send;
 uint64_t g_hash_mine[kMaxPlayers];   // host: the hashes of the tick below, by channel
 uint32_t g_hash_tick = UINT32_MAX;
@@ -100,6 +102,9 @@ uint64_t now_ms() {
     using namespace std::chrono;
     return (uint64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
 }
+
+uint32_t float_bits(float f) { uint32_t v; memcpy(&v, &f, 4); return v; }
+float bits_float(uint32_t v) { float f; memcpy(&f, &v, 4); return f; }
 
 // The build's identity: the recompiled code is the same on every platform, so these
 // tables are too. A peer with another build of the game would desync at once.
@@ -231,6 +236,7 @@ void host_handle(Reader& r, const sockaddr_in& from) {
     if (m == HELLO) {
         const uint32_t ver = r.u32();
         const uint64_t build = r.u64();
+        const float aspect = bits_float(r.u32());
         if (!r.ok) return;
         if (ver != kVersion || build != g_build) {
             Writer w = header(REJECT);
@@ -245,6 +251,7 @@ void host_handle(Reader& r, const sockaddr_in& from) {
                     g_peers[c].joined = true;
                     g_peers[c].addr = from;
                     g_peers[c].seen = std::chrono::steady_clock::now();
+                    g_peers[c].aspect = aspect;
                     char ip[64];
                     inet_ntop(AF_INET, &from.sin_addr, ip, sizeof(ip));
                     fprintf(stderr, "[netplay] player %d joined from %s:%d\n", c + 1, ip, ntohs(from.sin_port));
@@ -281,6 +288,13 @@ void host_handle(Reader& r, const sockaddr_in& from) {
             g_peers[chan].inputs_through++;
         if (htick != UINT32_MAX) hash_report(chan, htick, h);
     }
+}
+
+// The start, with the session's aspect. Sent until the client's first input arrives.
+void send_start(int c) {
+    Writer w = header(START);
+    w.u32(float_bits(g_aspect));
+    send_to(g_peers[c].addr, w);
 }
 
 // Each client's frames from what it has acknowledged up to the last one complete.
@@ -370,12 +384,16 @@ void lost(const char* who) {
 
 bool netplay_active() { return g_role != Role::None; }
 
+double netplay_aspect() { return g_aspect; }
+
+uint64_t netplay_ram_hash() { return ram_hash(); }
+
 void netplay_hash_exclude(uint32_t addr, uint32_t size) {
     const uint32_t off = addr - 0x80000000u;
     g_hash_skip.emplace_back(off, off + size);
 }
 
-bool netplay_host(int port, int players, int delay, const std::string& card) {
+bool netplay_host(int port, int players, int delay, double aspect, const std::string& card) {
     if (players < 2 || players > kMaxPlayers) {
         fprintf(stderr, "[netplay] a session is 2 to %d players\n", kMaxPlayers);
         return false;
@@ -386,6 +404,7 @@ bool netplay_host(int port, int players, int delay, const std::string& card) {
     g_delay = delay;
     g_chan = 0;
     g_build = build_id();
+    g_aspect = (float)aspect;
     g_epoch = time(nullptr);
     g_utc_offset = rtc_utc_offset();
     if (FILE* f = fopen(card.c_str(), "rb")) {
@@ -417,17 +436,17 @@ bool netplay_host(int port, int players, int delay, const std::string& card) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    for (int i = 0; i < 5; i++) {
-        for (int c = 1; c < players; c++) { Writer w = header(START); send_to(g_peers[c].addr, w); }
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
+    // What the game treats as in view can depend on the aspect (game_aspect.h); the session
+    // plays at the widest, so every player's sides are filled.
+    for (int c = 1; c < players; c++) g_aspect = std::max(g_aspect, g_peers[c].aspect);
+    for (int c = 1; c < players; c++) send_start(c);
     rtc_set_base(g_epoch);
     for (int c = 1; c < players; c++) g_peers[c].seen = std::chrono::steady_clock::now();
-    fprintf(stderr, "[netplay] everyone is in: starting (input delay %d ticks)\n", delay);
+    fprintf(stderr, "[netplay] everyone is in: starting (input delay %d ticks, the game's aspect %.3f)\n", delay, g_aspect);
     return true;
 }
 
-bool netplay_join(const char* host, const std::string& card_out) {
+bool netplay_join(const char* host, double aspect, const std::string& card_out) {
     std::string s(host);
     const size_t colon = s.rfind(':');
     if (colon == std::string::npos) { fprintf(stderr, "[netplay] --join wants host:port\n"); return false; }
@@ -475,8 +494,12 @@ bool netplay_join(const char* host, const std::string& card_out) {
                     memcpy(card.data() + off, r.b + r.i, len);
                     have += len;
                 }
-            } else if ((m == START || m == HFRAME) && welcomed && have >= card_size) {
-                started = true;
+            } else if (m == START && welcomed && have >= card_size) {
+                const float a = bits_float(r.u32());
+                if (r.ok && a > 0.0f) {
+                    g_aspect = a;
+                    started = true;
+                }
             }
         }
         const uint64_t now = now_ms();
@@ -484,7 +507,7 @@ bool netplay_join(const char* host, const std::string& card_out) {
             last = now;
             if (!welcomed) {
                 Writer w = header(HELLO);
-                w.u32(kVersion); w.u64(g_build);
+                w.u32(kVersion); w.u64(g_build); w.u32(float_bits((float)aspect));
                 send_to(g_host, w);
             } else {
                 Writer w = header(CARDACK);
@@ -498,7 +521,11 @@ bool netplay_join(const char* host, const std::string& card_out) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (FILE* f = fopen(card_out.c_str(), "wb")) {
+    // A host without a card formats one at boot, from the session's start time
+    // (memcard.cpp); so does a client given none, rather than read an empty file as a card.
+    if (card.empty()) {
+        remove(card_out.c_str());
+    } else if (FILE* f = fopen(card_out.c_str(), "wb")) {
         fwrite(card.data(), 1, card.size(), f);
         fclose(f);
     }
@@ -506,7 +533,7 @@ bool netplay_join(const char* host, const std::string& card_out) {
     rtc_set_utc_offset(g_utc_offset);
     g_peers[0].seen = std::chrono::steady_clock::now();
     g_role = Role::Client;
-    fprintf(stderr, "[netplay] starting (input delay %d ticks)\n", g_delay);
+    fprintf(stderr, "[netplay] starting (input delay %d ticks, the game's aspect %.3f)\n", g_delay, g_aspect);
     return true;
 }
 
@@ -555,6 +582,8 @@ void netplay_tick(const PadState& live) {
             const auto now = std::chrono::steady_clock::now();
             if (now - g_last_send > std::chrono::milliseconds(4)) {
                 host_send_frames(T);
+                for (int c = 1; c < g_players; c++)
+                    if (g_peers[c].inputs_through == 0) send_start(c);
                 g_last_send = now;
             }
         }

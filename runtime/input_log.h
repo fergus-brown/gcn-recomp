@@ -47,7 +47,7 @@ bool input_pad_poll(int chan, PadState& s);
 bool input_replay_active();
 
 // Poses the game's hooks read on the guest thread (vr::hand_pose and vr::eye_views in
-// vr_game.h) are input too: a game that aims from a controller or culls to the viewer's
+// vr_game.h, and the aspect of game_aspect.h) are input too: a game that aims from a controller or culls to the viewer's
 // head steers its simulation by them, and a replay without them parts from the recording
 // as soon as they matter. Each read is counted per kind, in the order the guest makes
 // them, and a change in what a read returned is logged against that count

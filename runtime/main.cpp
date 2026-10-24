@@ -417,6 +417,12 @@ int main(int argc, char** argv) {
         if (!input_replay_load(replay_dir, replay_card)) return 1;
         if (!replay_card.empty()) g_memcard_path = replay_card.c_str();
     }
+    // The display settings, then this run's overrides (DisplaySettings). A session sends
+    // the aspect (game_aspect.h).
+    settings_load();
+    if (scale >= 0) g_display.scale = scale;
+    if (aspect_arg) g_display.aspect = aspect_arg;
+    if (fullscreen_arg) g_display.fullscreen = true;
     // A session: every peer plays on the host's card and clock. A client keeps the host's
     // card in a scratch file, as a replay does, so its own card is untouched.
     if (net_host_port || net_join) {
@@ -424,9 +430,9 @@ int main(int argc, char** argv) {
         plat_make_dirs("saves");
         if (net_join) {
             replay_card = "saves/memcard_session.raw";
-            if (!netplay_join(net_join, replay_card)) return 1;
+            if (!netplay_join(net_join, aspect_value(g_display.aspect), replay_card)) return 1;
             g_memcard_path = replay_card.c_str();
-        } else if (!netplay_host(net_host_port, net_players, net_delay,
+        } else if (!netplay_host(net_host_port, net_players, net_delay, aspect_value(g_display.aspect),
                                  g_memcard_path ? g_memcard_path : "saves/memcard_a.raw")) {
             return 1;
         }
@@ -560,11 +566,6 @@ int main(int argc, char** argv) {
     // per machine, and the game's key list builds the known ones at the first start, on
     // the compile workers. GCN_ASYNC_SHADERS=1 turns background builds on to try them.
     gx::render_set_async_shaders(false);
-    // The display settings, then this run's overrides (DisplaySettings).
-    settings_load();
-    if (scale >= 0) g_display.scale = scale;
-    if (aspect_arg) g_display.aspect = aspect_arg;
-    if (fullscreen_arg) g_display.fullscreen = true;
     g_window = win;
     display_apply_fullscreen();
     gx::render_set_aspect(aspect_value(g_display.aspect));

@@ -603,10 +603,10 @@ void android_main(android_app* app) {
         int players = 2, delay = 6;
         sscanf(net.c_str(), "%15s %127s %d %d", verb, arg, &players, &delay);
         if (!strcmp(verb, "host")) {
-            if (!netplay_host(atoi(arg), players, delay, card)) LOGE("netplay: could not host; playing alone");
+            if (!netplay_host(atoi(arg), players, delay, gx::render_aspect(), card)) LOGE("netplay: could not host; playing alone");
         } else if (!strcmp(verb, "join")) {
             session_card = dir + "/memcard_session.raw";
-            if (netplay_join(arg, session_card)) g_memcard_path = session_card.c_str();
+            if (netplay_join(arg, gx::render_aspect(), session_card)) g_memcard_path = session_card.c_str();
             else LOGE("netplay: could not join %s; playing alone", arg);
         }
     }

@@ -39,13 +39,27 @@ whole session exactly with `--replay`.
   different code refuse each other. The host sends its memory card, which a client keeps
   in `saves/memcard_session.raw` and plays on, the RTC's start time and its UTC offset, so
   every peer's calendar reads the same. Both are in the input log (`# epoch`,
-  `# utc offset`).
+  `# utc offset`). A host with no card formats one at boot, stamped with the session's
+  start time, and a client given none does the same, so the two cards are alike.
+- **The aspect.** A game that culls to a widescreen picture (`game_aspect.h`) makes the
+  aspect game state. Each client sends the host the aspect it displays, and the host sends
+  back, with the start, the widest of everyone's; every peer culls to that, whatever it
+  displays, so nobody's sides are empty. F9 in a session changes the picture, not the
+  culling. The host sends the start until each client's first input arrives.
 - **Desync check.** Every 1200 ticks (10 s) each peer hashes guest RAM at the same tick and
   the host compares; a mismatch prints `DESYNC` with the tick. The session goes on; the
-  peers' input logs are what to compare.
+  peers' input logs are what to compare. A game's hooks can make memory differ without
+  the game having diverged (GPU commands recorded into a display list differ between
+  peers drawing differently); the game leaves such ranges out with
+  `netplay_hash_exclude`. `GCN_RAMHASH` (`diagnostics.md`) prints the same hash outside
+  a session, to find them.
 - **Lost peers.** Fifteen seconds without a packet from a peer the session is waiting on
   ends the session on every peer that notices.
 
 Tested on one machine with two instances over loopback: a scripted host and an idle client
 rendered the same frames through boot, menus and the start of a game, made the same 5482
 clock jumps, and no RAM hash differed.
+
+Tested again with a game whose hooks cull to the widescreen picture: a host at 21:9 and a
+client at 4:3, the client dropping in as the second player mid-level. Both culled at
+21:9, drew the same game, and every RAM hash matched (15 over 8400 frames).

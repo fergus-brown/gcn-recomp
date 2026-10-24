@@ -300,7 +300,12 @@ bool input_pose(const char* kind, bool* valid, float* v, int n) {
     if (g_replay_loaded && replay_key() <= g_replay_last_key) {
         while (ch.pos < ch.replay.size() && ch.replay[ch.pos].read <= ch.reads) {
             const PoseRecord& r = ch.replay[ch.pos++];
-            if (r.read == ch.reads) parted(ch.kind == "eyes" ? "a read of the eyes" : "a read of a hand", r.lo, r.hi);
+            if (r.read == ch.reads) {
+                const std::string what = ch.kind == "eyes" ? "a read of the eyes"
+                                         : ch.kind.compare(0, 4, "hand") == 0 ? "a read of a hand"
+                                                                              : "a read of the " + ch.kind;
+                parted(what.c_str(), r.lo, r.hi);
+            }
             ch.have = true;
             ch.valid = r.valid;
             ch.v = r.v;

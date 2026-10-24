@@ -60,8 +60,12 @@ static void put64(uint8_t* p, uint64_t v) { for (int i = 0; i < 8; i++) p[i] = (
 // CARDGetSerialNo is the XOR of these 32 bytes as four 64-bit words, so the format time
 // must not be zero: it used to be, the serial came out zero, and a game's save points
 // took that as "no card" and never offered to save. Rewrites the header checksum.
+// The time is the run's start (the RTC's base) once something has set it: a recording and
+// its replay, or every peer of a session, then format the same card, as they must, since
+// the game reads the serial into its memory.
 void MemCard::write_serial(uint8_t* h) {
-    uint64_t t = (uint64_t)(time(nullptr) - 946684800) * 40500000ull;  // an OSTime of now
+    const time_t now = rtc_base() ? rtc_base() : time(nullptr);
+    uint64_t t = (uint64_t)(now - 946684800) * 40500000ull;  // an OSTime of then
     if (!t) t = 1;
     uint64_t rand = t;
     for (int i = 0; i < 12; i++) {
