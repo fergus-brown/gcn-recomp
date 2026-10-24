@@ -42,6 +42,12 @@ bool netplay_join(const char* host, double aspect, const std::string& card_out);
 // Whether a session is in progress.
 bool netplay_active();
 
+// The channel this machine plays in a session -- or, replaying a session's log, the
+// channel of the machine that recorded it -- else -1. A game that runs differently in a
+// session (the same on every machine) or shows each machine its own player asks here, so
+// that a replay of the session does the same.
+int netplay_session_channel();
+
 // The session's aspect, the widest any player displays, for game_aspect.h.
 double netplay_aspect();
 

@@ -971,6 +971,19 @@ its x taken in by `1 / g_wide` in one of two ways:
 - **2D**, and 3D in a small viewport (a portrait inside a menu bubble), is taken in about
   the centre of the picture, scissor included, so it keeps its size and stays in the middle.
 
+**Another camera's view of the same frame** (`set_view_correction`, `render.h`). A game that
+has a second camera to show -- each player's own, in an online session -- without drawing
+the frame twice (which would change its state) draws as it always does and gives the 3x4
+matrix from its camera's view space to the other camera's. The correction takes its place
+in the command stream like a view turn, travels with each draw command (`Cmd::corr`,
+`Batch::corrs`), and is applied before the batch's vertices are uploaded
+(`apply_view_corrections`): to the view-space positions of a camera's draws (perspective, in
+a viewport at least ~45% of the width) that are not drawn into a texture (their next copy is
+to a texture and holds their viewport). Lighting stays as the game did it, in its own view
+space. What the game places in front of its camera (a HUD drawn in perspective) it keeps out
+by ending the correction around those draws. What the game's camera culled is missing from
+the other view; that is the game's to widen.
+
 `classify_wide` leaves these draws at full width:
 
 - an orthographic layer that spans the whole picture (a background, a fade, a screen grab

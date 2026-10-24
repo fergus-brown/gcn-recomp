@@ -3042,6 +3042,43 @@ uint32_t present_count() { return g_present_count; }
 // and copied into its bubble came out shifted towards the middle. (That is the mapping of
 // a 2D draw and of a camera centred on the picture; a split screen's half copied to a
 // texture would need its own.)
+// The view corrections (set_view_correction), applied to the batch's vertices before they
+// are uploaded: to each draw that carries one, is a camera's (a perspective projection in a
+// viewport at least ~45% of the width), and is not drawn into a texture (its next copy goes
+// to a texture, is of less than the whole picture and holds the draw's viewport -- a
+// portrait rendered for a HUD, which the copy has to find where the game drew it).
+static void apply_view_corrections(Batch& b) {
+    if (b.corrs.empty()) return;
+    const EfbCopyCmd* next = nullptr;
+    for (size_t i = b.cmds.size(); i-- > 0;) {
+        const Cmd& c = b.cmds[i];
+        if (c.type == CmdType::EfbCopy || c.type == CmdType::Present) {
+            next = &c.copy;
+            continue;
+        }
+        if (c.type != CmdType::Draw || c.corr == ~0u) continue;
+        const PixelState& st = b.states[c.state];
+        if ((int)st.proj[6] != 0 || 2.0f * std::fabs(st.viewport[0]) < 0.45f * EFB_W) continue;
+        if (next && !next->to_xfb && next->tex_id && next->src_w < EFB_W - 8) {
+            int xoff, yoff;
+            scissor_offset(st.bp, xoff, yoff);
+            const float cx = st.viewport[3] - xoff, half = std::fabs(st.viewport[0]);
+            if (cx - half >= (float)next->src_x - 1.0f && cx + half <= (float)(next->src_x + next->src_w) + 1.0f) continue;
+        }
+        const float* C = b.corrs.data() + 12 * c.corr;
+        const uint32_t stride = packed_stride(draw_ntex(st));
+        for (uint32_t v = c.vfirst; v < c.vfirst + c.vcount; v++) {
+            float* p = b.verts[v].pos;
+            const float x = p[0], y = p[1], z = p[2];
+            p[0] = C[0] * x + C[1] * y + C[2] * z + C[3];
+            p[1] = C[4] * x + C[5] * y + C[6] * z + C[7];
+            p[2] = C[8] * x + C[9] * y + C[10] * z + C[11];
+            const size_t at = (size_t)((int64_t)v + c.base_vertex) * stride;
+            if (at + 12 <= b.packed.size()) memcpy(b.packed.data() + at, p, 12);
+        }
+    }
+}
+
 static bool samples_fullscreen_copy(const PixelState& st);
 static void classify_wide(const Batch& b) {
     g_wide_full.assign(b.cmds.size(), 0);
@@ -4364,6 +4401,7 @@ static bool execute_batch(Batch& b, bool do_present, const std::vector<uint8_t>*
         g_ebo = g_ebos[g_vertex_set];
         glBindVertexArray(g_vao);
         glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+        apply_view_corrections(const_cast<Batch&>(b));
         glBufferData(GL_ARRAY_BUFFER, b.packed.size(), b.packed.data(), GL_STREAM_DRAW);
         upload_indices(b);
         ms_vbo = frametime_on() ? ms_since(t_start) - ms_tex : 0.0;

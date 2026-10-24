@@ -41,6 +41,10 @@ whole session exactly with `--replay`.
   every peer's calendar reads the same. Both are in the input log (`# epoch`,
   `# utc offset`). A host with no card formats one at boot, stamped with the session's
   start time, and a client given none does the same, so the two cards are alike.
+- **Whose machine.** `netplay_session_channel()` is the channel this machine plays, or, in
+  a replay of a session's log, the recording machine's (the log says `# session channel`),
+  else -1. A game that plays differently in a session (alike on every machine) or shows
+  each machine its own player asks there, so that a replay of the session does the same.
 - **The aspect.** A game that culls to a widescreen picture (`game_aspect.h`) makes the
   aspect game state. Each client sends the host the aspect it displays, and the host sends
   back, with the start, the widest of everyone's; every peer culls to that, whatever it

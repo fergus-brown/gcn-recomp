@@ -386,6 +386,8 @@ bool netplay_active() { return g_role != Role::None; }
 
 double netplay_aspect() { return g_aspect; }
 
+int netplay_session_channel() { return g_role != Role::None ? g_chan : input_replay_session_channel(); }
+
 uint64_t netplay_ram_hash() { return ram_hash(); }
 
 void netplay_hash_exclude(uint32_t addr, uint32_t size) {

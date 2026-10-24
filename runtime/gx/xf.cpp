@@ -106,6 +106,7 @@ Batch::~Batch() {
     b.indices.swap(indices);
     b.states.swap(states);
     b.mtxs.swap(mtxs);
+    b.corrs.swap(corrs);
     b.new_textures.swap(new_textures);
     b.dead_textures.swap(dead_textures);
     // Emptied now, on the thread that is done with it: the decoded textures go with it.
@@ -115,6 +116,7 @@ Batch::~Batch() {
     b.indices.clear();
     b.states.clear();
     b.mtxs.clear();
+    b.corrs.clear();
     b.new_textures.clear();
     b.dead_textures.clear();
     std::lock_guard<std::mutex> lk(pool_mutex());
@@ -143,6 +145,15 @@ static Batch& batch() {
 void view_turn_reached(const float q[4]) {
     memcpy(g_view_turn, q, sizeof(g_view_turn));
     if (g_batch) memcpy(g_batch->view_turn, q, sizeof(g_view_turn));
+}
+
+// set_view_correction, where the command stream has got to it: the draws from here on
+// carry it (Cmd::corr), and the renderer applies it.
+static float g_corr[12];
+static bool g_corr_on;
+void view_correction_reached(const float* m) {
+    g_corr_on = m != nullptr;
+    if (m) memcpy(g_corr, m, sizeof(g_corr));
 }
 
 // set_draw_tag, where the command stream has got to it: the states taken from here on
@@ -1583,6 +1594,14 @@ static void draw_impl(const DrawCall& dc) {
         c_mtx = mtx;
         c_mtxs_size = b.mtxs.size();
     }
+    // The view correction in force (set_view_correction), appended when it differs from the
+    // last one appended.
+    uint32_t corr = ~0u;
+    if (g_corr_on) {
+        if (b.corrs.size() < 12 || memcmp(b.corrs.data() + b.corrs.size() - 12, g_corr, sizeof(g_corr)) != 0)
+            b.corrs.insert(b.corrs.end(), g_corr, g_corr + 12);
+        corr = (uint32_t)b.corrs.size() / 12 - 1;
+    }
     uint32_t first = (uint32_t)b.indices.size();
     uint8_t prim = 0;
     // Sized once and written through a pointer: a push_back per index, with its capacity
@@ -1635,7 +1654,7 @@ static void draw_impl(const DrawCall& dc) {
     if (!b.cmds.empty()) {
         Cmd& last = b.cmds.back();
         if (last.type == CmdType::Draw && last.state == state && last.prim == prim &&
-            last.mtx == mtx && last.first + last.count == first && last.vfirst + last.vcount == base) {
+            last.mtx == mtx && last.corr == corr && last.first + last.count == first && last.vfirst + last.vcount == base) {
             last.count += count;
             last.vcount += dc.count;
             pd.draws.back().cmd = (uint32_t)b.cmds.size() - 1;
@@ -1649,6 +1668,7 @@ static void draw_impl(const DrawCall& dc) {
     c.first = first;
     c.count = count;
     c.mtx = mtx;
+    c.corr = corr;
     c.vfirst = base;
     c.vcount = dc.count;
     pd.draws.back().cmd = (uint32_t)b.cmds.size();

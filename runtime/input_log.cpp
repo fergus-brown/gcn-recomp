@@ -2,6 +2,7 @@
 #include "input_log.h"
 #include "runtime.h"
 #include "platform.h"
+#include "netplay.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -53,6 +54,7 @@ std::vector<Entry> g_replay;     // sorted by key, as logged
 size_t g_replay_pos;             // first entry not yet applied
 PadState g_replay_state[4];
 bool g_replay_loaded;
+int g_replay_session_channel = -1;   // a session's log: the channel of the machine that recorded it
 bool g_replay_by_frame;          // a v1 log
 uint32_t g_replay_last_key;      // the last change, or the end marker when the log has one
 
@@ -132,6 +134,8 @@ bool input_log_start(const std::string& dir, const std::string& memcard_path) {
     rtc_set_base(now);
     fprintf(g_out, "# gcn-recomp input log v4\n# game %s  started %s\n# epoch %lld\n# utc offset %d\n", GCN_DISC_ID,
             stamp, (long long)now, rtc_utc_offset());
+    // A session's log says so, and whose machine recorded it (netplay_session_channel).
+    if (netplay_active()) fprintf(g_out, "# session channel %d\n", netplay_session_channel());
     fprintf(g_out, "# poll frame chan connected buttons stick_x stick_y cstick_x cstick_y trig_l trig_r\n");
     fprintf(g_out, "# (hex; each line is that channel's state from that pad poll on)\n");
     fprintf(g_out, "# jump <back-edge count> <edges>: the clock caught up with the host there (decimal)\n");
@@ -185,6 +189,7 @@ bool input_replay_load(const std::string& dir, std::string& memcard_out) {
             if (sscanf(line, "# gcn-recomp input log v%d", &version) == 1) continue;
             if (sscanf(line, "# epoch %lld", &epoch) == 1) rtc_set_base((time_t)epoch);
             if (sscanf(line, "# utc offset %d", &offset) == 1) rtc_set_utc_offset(offset);
+            if (sscanf(line, "# session channel %d", &g_replay_session_channel) == 1) continue;
             if (sscanf(line, "# end %u %u", &end_poll, &end_frame) == 2) end_key = version >= 2 ? end_poll : end_frame;
             continue;
         }
@@ -286,6 +291,8 @@ uint64_t input_replay_take_jump(uint64_t count) {
     g_next_jump_at = g_jump_pos < g_jumps.size() ? g_jumps[g_jump_pos].at : UINT64_MAX;
     return edges;
 }
+
+int input_replay_session_channel() { return g_replay_session_channel; }
 
 bool input_replay_active() {
     std::lock_guard<std::mutex> lk(g_mutex);

@@ -184,6 +184,10 @@ struct Cmd {
     // eye hook reads off it -- which draws are the player's, and where they stand. The
     // index only changes when the matrix does, so a run of draws sharing one shares it.
     uint32_t mtx;
+    // The view correction in force when the draw was written (set_view_correction): an
+    // index into Batch::corrs, ~0 for none. The renderer applies it, to a camera's draws
+    // that are not drawn into a texture.
+    uint32_t corr;
     // The vertices the draw's indices refer to, Batch::verts[vfirst, vfirst + vcount),
     // and where they are in Batch::packed: the region for the state's texture coordinate
     // count, vertex index v at packed vertex v + base_vertex. See Batch::packed.
@@ -220,6 +224,8 @@ struct Batch {
     // The position matrices the draws used, twelve floats each in GX's row-major 3x4
     // layout (row r is m[r*4..r*4+3], the last column the translation). See Cmd::mtx.
     std::vector<float> mtxs;
+    // The view corrections the draws take, twelve floats each in the same layout. See Cmd::corr.
+    std::vector<float> corrs;
     std::vector<std::shared_ptr<TexData>> new_textures;
     // Textures the front end has let go of -- unreferenced for a while, or replaced because
     // the game rewrote them -- which the renderer deletes once this batch is drawn. The
@@ -276,6 +282,24 @@ void set_view_turn(const float q[4]);
 // land on the far side of it. A tag is best changed where the game has written a little
 // state (a projection, a viewport) between the change and the nearest draw.
 void set_draw_tag(uint8_t tag);
+
+// A correction to the game's 3D view, from the guest thread: the 3x4 matrix (GX's layout,
+// row-major, the last column the translation) that takes the game camera's view space to
+// the view space of another camera, or null to end it. Perspective draws written after it
+// have their view-space positions taken through it before they are projected, so the
+// frame is drawn from the other camera; their lighting stays as the game lit it, which is
+// the same in either space. Only a camera's draws take it (a perspective projection in a
+// viewport at least ~45% of the width, as widescreen tells them) that are not drawn into a
+// texture (a portrait the game renders and copies into its HUD, a reflection): orthographic
+// draws (2D), 3D in a small viewport and render-to-texture passes are left alone, and so
+// is anything the
+// game places relative to its camera (a HUD drawn in perspective in front of the camera)
+// if it ends the correction around those draws. Pinned to the command stream like a view
+// turn, with the same caveat as a draw tag about the gather pipe's last few bytes.
+// For a game that has a second camera to show (each player's own, in an online session)
+// without drawing the frame twice: the game draws as it always does, so its state is the
+// same whichever view a machine shows.
+void set_view_correction(const float* m);
 
 // Frame pacing / stats
 extern std::atomic<uint32_t> g_frames_submitted;

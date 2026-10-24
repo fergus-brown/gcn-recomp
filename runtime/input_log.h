@@ -46,6 +46,10 @@ bool input_pad_poll(int chan, PadState& s);
 // Whether a replay is in progress (loaded and not yet past its last poll).
 bool input_replay_active();
 
+// The log being replayed was recorded on a machine of an online session: that machine's
+// channel (`# session channel`), else -1. See netplay_session_channel.
+int input_replay_session_channel();
+
 // Poses the game's hooks read on the guest thread (vr::hand_pose and vr::eye_views in
 // vr_game.h, and the aspect of game_aspect.h) are input too: a game that aims from a controller or culls to the viewer's
 // head steers its simulation by them, and a replay without them parts from the recording
