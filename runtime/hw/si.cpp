@@ -4,6 +4,7 @@
 #include "../netplay.h"
 #include "../game_aspect.h"
 #include "pad.h"
+#include <cstdlib>
 #include <mutex>
 
 PadState g_pads[4];
