@@ -485,7 +485,8 @@ so the variants never mix with the real ones).
   matrices, `indcs=` the coordinate scales, `iref=` the stages' maps and coordinates,
   `indcmd=` each TEV stage's indirect command) as the raw BP words, and its first vertices
   with colours and texture coordinates.
-- `GCN_MTXLOG=<frame>` prints the position matrix and projection of every draw in that frame;
+- `GCN_MTXLOG=<frame>` prints the position matrix and projection of every draw in that frame,
+  and whether a view correction (`gx::set_view_correction`) was in force for it (`corr=`);
   `GCN_PNMLOG=a-b` lists the position matrices used over a window of frames.
 - `GCN_WATCH=a,b,c` (with `GCN_MTXLOG` set) prints those guest addresses every frame;
   `GCN_PEEK=a,b` prints them in the crash dump.

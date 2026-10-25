@@ -1524,12 +1524,12 @@ static void draw_impl(const DrawCall& dc) {
         const uint32_t m = (g_in[0].pnmtx & 63) * 4;
         const PixelState& ps = b.states[state];
         fprintf(stderr, "[mtx] %3u n=%4u pnmtx=%2u st=%u | %8.3f %8.3f %8.3f %10.2f | %8.3f %8.3f %8.3f %10.2f"
-                " | %8.3f %8.3f %8.3f %10.2f | out0=%.1f,%.1f,%.1f |",
+                " | %8.3f %8.3f %8.3f %10.2f | out0=%.1f,%.1f,%.1f | corr=%d",
                 g_mtx_draw, dc.count, g_in[0].pnmtx & 63, state,
                 xf_f(m + 0), xf_f(m + 1), xf_f(m + 2), xf_f(m + 3),
                 xf_f(m + 4), xf_f(m + 5), xf_f(m + 6), xf_f(m + 7),
                 xf_f(m + 8), xf_f(m + 9), xf_f(m + 10), xf_f(m + 11),
-                out[0].pos[0], out[0].pos[1], out[0].pos[2]);
+                out[0].pos[0], out[0].pos[1], out[0].pos[2], (int)g_corr_on);
         // The textures too: a model is recognised by what it is textured with, so this
         // is what ties a draw in one pass to the same model drawn in another.
         for (int i = 0; i < 8; i++)
